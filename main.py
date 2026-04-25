@@ -104,10 +104,14 @@ async def agentmail_webhook(request: Request):
 
     result = await core.answer_codebase_question(question, history, sender=sender, mode=mode)
 
-    cc = [
-        e["email"] for e in result["engineers"]
-        if AUTO_CC_DOMAINS and any(e["email"].lower().endswith("@" + d) for d in AUTO_CC_DOMAINS)
-    ] or None
+    # Auto-CC requires (a) the admin toggle is ON and (b) the engineer's email
+    # domain is in AUTO_CC_DOMAINS. Default OFF so we never surprise OSS maintainers.
+    cc_enabled = cache.get_setting("auto_cc_enabled", "0") == "1"
+    cc = (
+        [e["email"] for e in result["engineers"]
+         if AUTO_CC_DOMAINS and any(e["email"].lower().endswith("@" + d) for d in AUTO_CC_DOMAINS)]
+        if cc_enabled else []
+    ) or None
     await reply_to_message(message_id, result["answer_html"], cc=cc)
     return {
         "ok": True,

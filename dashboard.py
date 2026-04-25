@@ -134,6 +134,9 @@ def render_features_html() -> str:
     cc_domains = [d.strip() for d in os.environ.get("AUTO_CC_DOMAINS", "").split(",") if d.strip()]
     users = cache.list_users()
     lockdown = cache.get_setting("lockdown", "0") == "1"
+    db_path = cache.CACHE_DB_PATH
+    db_exists = os.path.exists(db_path)
+    db_size = os.path.getsize(db_path) if db_exists else 0
 
     # Voice / mode list
     modes_html = " ".join(_badge(m) for m in ("eng", "sales", "marketing", "support"))
@@ -170,7 +173,7 @@ def render_features_html() -> str:
         + _feature_card("🔌", "Skill API", '<code>POST /skill/ask</code>', "OpenClaw, Roam, CLI — same brain")
         + _feature_card("🎭", "Modes", modes_html, "subject tag · sender map · default eng")
         + _feature_card("👥", "Known senders", str(len(users)), f'<a href="/admin">manage in /admin</a>')
-        + _feature_card("⚡", "Memory cache", "SQLite", "duplicate Q&A returns in <1s")
+        + _feature_card("⚡", "Memory cache", f"SQLite · <code>{html.escape(db_path)}</code>", f"{db_size:,} bytes — {'persistent' if db_path.startswith(('/disk', '/var/data')) else '⚠ EPHEMERAL — set CACHE_DB_PATH'}")
         + _feature_card("🔍", "Auto-CC engineer", cc_html, "via git blame on cited code")
         + _feature_card("🛡️", "Lockdown", lock_html, "")
         + '</div>'

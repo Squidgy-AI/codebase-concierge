@@ -81,10 +81,13 @@ def _flag_row(f: dict) -> str:
 
 
 def render() -> str:
+    import core
     users = cache.list_users()
     flagged = cache.list_flagged(limit=50, only_unresolved=True)
     lockdown = cache.get_setting("lockdown", "0") == "1"
+    cc_enabled = cache.get_setting("auto_cc_enabled", "0") == "1"
     s = cache.stats()
+    prompts = {m: core.get_prompt(m) for m in ("eng", "sales", "marketing", "support")}
 
     user_rows = "\n".join(_user_row(u) for u in users) or (
         '<tr><td colspan="4" style="color:#999;text-align:center;padding:18px">'
@@ -95,6 +98,25 @@ def render() -> str:
         'Nothing flagged.</td></tr>'
     )
     lock_state = "ON — unknown senders are logged and ignored" if lockdown else "OFF — unknown senders get answered (and still flagged)"
+    cc_state = "ON — engineers in allowed domains will be CC'd on replies" if cc_enabled else "OFF — engineers shown in email body only, never CC'd"
+
+    prompts_html = "".join(
+        f'<form method="post" action="/admin/prompt" style="margin-bottom:16px">'
+        f'  <input type="hidden" name="mode" value="{m}">'
+        f'  <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">{_badge(m)}'
+        f'    <span style="color:#888;font-size:12px">system prompt</span></div>'
+        f'  <textarea name="prompt" rows="6" style="width:100%;font-family:ui-monospace,Menlo,monospace;'
+        f'    font-size:12px;padding:10px;border:1px solid #ddd;border-radius:6px;line-height:1.45">'
+        f'{html.escape(prompts[m])}</textarea>'
+        f'  <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:6px">'
+        f'    <button type="submit">Save</button>'
+        f'    <button type="submit" name="reset" value="1" formnovalidate '
+        f'      onclick="return confirm(\'Reset {m} prompt to default?\')" '
+        f'      style="background:#fff;color:#c33;border:1px solid #c33">Reset to default</button>'
+        f'  </div>'
+        f'</form>'
+        for m in ("eng", "sales", "marketing", "support")
+    )
 
     return f"""<!doctype html>
 <html lang="en">
@@ -158,11 +180,26 @@ def render() -> str:
     </div>
 
     <div class="panel">
+      <h2 style="margin-top:0">Auto-CC engineers</h2>
+      <form method="post" action="/admin/auto_cc" class="toggle">
+        <input type="hidden" name="enabled" value="{0 if cc_enabled else 1}">
+        <button type="submit">{"Disable" if cc_enabled else "Enable"} auto-CC</button>
+        <span class="state">{html.escape(cc_state)}</span>
+      </form>
+    </div>
+
+    <div class="panel">
       <h2 style="margin-top:0">Pre-warm cache</h2>
       <form method="post" action="/admin/prewarm" class="toggle">
         <button type="submit">▶ Run all demo scenarios</button>
         <span class="state">Runs the 7 questions on /demo through the brain, populating the cache. Misses fire Nia (~25s each); hits are instant. Runs in background — refresh /admin or / to see entries appear.</span>
       </form>
+    </div>
+
+    <div class="panel">
+      <h2 style="margin-top:0">Mode prompts</h2>
+      <p class="sub" style="margin:-4px 0 12px">These are the Claude system prompts for each mode. Edit and save to override; reset clears the override and falls back to the baked-in default.</p>
+      {prompts_html}
     </div>
 
     <div class="panel">
@@ -238,6 +275,27 @@ async def resolve_flagged(flag_id: int = Form(...)):
 @router.post("/admin/lockdown", dependencies=[Depends(_require_admin)])
 async def set_lockdown(enabled: int = Form(...)):
     cache.set_setting("lockdown", "1" if int(enabled) else "0")
+    return RedirectResponse("/admin", status_code=303)
+
+
+@router.post("/admin/auto_cc", dependencies=[Depends(_require_admin)])
+async def set_auto_cc(enabled: int = Form(...)):
+    cache.set_setting("auto_cc_enabled", "1" if int(enabled) else "0")
+    return RedirectResponse("/admin", status_code=303)
+
+
+@router.post("/admin/prompt", dependencies=[Depends(_require_admin)])
+async def set_prompt(
+    mode: str = Form(...),
+    prompt: str = Form(""),
+    reset: str = Form(""),
+):
+    if mode not in ("eng", "sales", "marketing", "support"):
+        raise HTTPException(status_code=400, detail="invalid mode")
+    if reset:
+        cache.set_setting(f"prompt_{mode}", "")
+    else:
+        cache.set_setting(f"prompt_{mode}", prompt)
     return RedirectResponse("/admin", status_code=303)
 
 

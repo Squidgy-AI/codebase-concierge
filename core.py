@@ -270,6 +270,14 @@ def detect_mode(sender: str | None, subject: str | None) -> str:
 # ---------- Claude composition ----------
 
 
+def get_prompt(mode: str) -> str:
+    """Per-mode system prompt. Editable in /admin via the settings table —
+    falls back to the baked-in default."""
+    default = SYSTEM_PROMPTS.get(mode, SYSTEM_PROMPTS["eng"])
+    override = cache.get_setting(f"prompt_{mode}", "")
+    return override.strip() if override and override.strip() else default
+
+
 def compose_answer_html(
     question: str,
     nia_response: dict,
@@ -296,7 +304,7 @@ def compose_answer_html(
         engineers_html = f"<h3>Last touched by</h3><ul>{items}</ul>"
     nia_draft = nia_response.get("content", "")
 
-    system_prompt = SYSTEM_PROMPTS.get(mode, SYSTEM_PROMPTS["eng"])
+    system_prompt = get_prompt(mode)
     msg = claude.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=1500,
