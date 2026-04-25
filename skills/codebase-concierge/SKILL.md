@@ -57,6 +57,14 @@ print(result["engineers"])         # [{name, email, date, source}, ...]
 | `marketing` | `[marketing]` in subject | Hook + bullets + suggested headline; no code |
 | `support` | `[support]` in subject | First word: BUG / EXPECTED / NEEDS-MORE-INFO + evidence + workaround |
 
-Mode is detected by `core.detect_mode(sender, subject)` — subject tags only (sender-domain heuristics intentionally skipped to avoid misroutes). Override per-request via `mode` in the `/skill/ask` body.
+Mode is detected by `core.detect_mode(sender, subject)`. Precedence:
+1. Subject tag (e.g. `[sales]`) — always wins
+2. `SENDER_MODES` env var: comma-separated `email:mode` or `@domain:mode` pairs (exact email beats domain). Example:
+   ```
+   SENDER_MODES=cs@acme.com:support,@partner.com:sales,@yourco.com:eng
+   ```
+3. Default: `eng`
+
+`/skill/ask` callers can override per-request with `mode` in the JSON body.
 
 ## Built for OpenClaw Hackathon (Eragon × Nozomio × AgentMail).

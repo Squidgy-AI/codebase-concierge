@@ -26,3 +26,5 @@ services:
         value: users.noreply.github.com
       - key: REPOS_DIR
         value: repos
+      - key: SENDER_MODES
+        sync: false

@@ -193,17 +193,56 @@ SYSTEM_PROMPTS = {
 }
 
 
-def detect_mode(sender: str | None, subject: str | None) -> str:
-    """Pick a mode from explicit subject tags first, then default to eng.
+# SENDER_MODES env var: comma-separated "email_or_@domain:mode" pairs.
+# Example: "sw@seth.co.uk:sales,@theai.team:eng,@4142.ltd:marketing"
+# Exact email beats domain. Subject tag still overrides everything.
+def _parse_sender_modes(raw: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry or ":" not in entry:
+            continue
+        key, mode = entry.rsplit(":", 1)
+        key, mode = key.strip().lower(), mode.strip().lower()
+        if mode in SYSTEM_PROMPTS:
+            out[key] = mode
+    return out
 
-    Recognized subject tags (case-insensitive, anywhere in subject):
-      [sales]  [marketing]  [support]  [eng]
-    Sender-domain heuristics deliberately skipped — too easy to misroute.
+
+SENDER_MODES = _parse_sender_modes(os.environ.get("SENDER_MODES", ""))
+
+
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+")
+
+
+def _extract_email(sender: str | None) -> str | None:
+    if not sender:
+        return None
+    m = _EMAIL_RE.search(sender)
+    return m.group(0).lower() if m else None
+
+
+def detect_mode(sender: str | None, subject: str | None) -> str:
+    """Pick a mode for this message.
+
+    Precedence:
+      1. Explicit subject tag: [sales] / [marketing] / [support] / [eng]
+      2. Sender map (env: SENDER_MODES) — exact email beats domain
+      3. Default: eng
     """
     s = (subject or "").lower()
     for mode in ("sales", "marketing", "support", "eng"):
         if f"[{mode}]" in s:
             return mode
+
+    email = _extract_email(sender)
+    if email:
+        if email in SENDER_MODES:
+            return SENDER_MODES[email]
+        domain = email.split("@", 1)[1] if "@" in email else None
+        if domain and f"@{domain}" in SENDER_MODES:
+            return SENDER_MODES[f"@{domain}"]
+
     return "eng"
 
 
