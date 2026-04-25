@@ -9,7 +9,7 @@ import html
 import os
 import secrets
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
@@ -240,6 +240,14 @@ def render() -> str:
         <input type="text" name="display_name" placeholder="display name (e.g. Acme Docs)">
         <button type="submit">Add &amp; index</button>
       </form>
+
+      <h3 style="font-size:13px;margin:18px 0 6px;color:#555">Upload a file</h3>
+      <p class="sub" style="margin:-4px 0 8px">Accepts <code>.pdf</code>, <code>.docx</code>, <code>.txt</code>, <code>.md</code>. Non-PDFs get converted to PDF in-memory before indexing.</p>
+      <form method="post" action="/admin/sources/upload" enctype="multipart/form-data" class="form-row">
+        <input type="file" name="file" required accept=".pdf,.docx,.txt,.md,application/pdf,text/plain,text/markdown,application/vnd.openxmlformats-officedocument.wordprocessingml.document">
+        <input type="text" name="display_name" placeholder="display name (optional)">
+        <button type="submit">Upload &amp; index</button>
+      </form>
     </div>
 
     <div class="panel">
@@ -389,6 +397,34 @@ async def add_doc(url: str = Form(...), display_name: str = Form("")):
 async def remove_doc(display_name: str = Form(...)):
     import core
     active = [d for d in core.get_active_data_sources() if d != display_name.strip()]
+    _set_active_docs(active)
+    return RedirectResponse("/admin", status_code=303)
+
+
+@router.post("/admin/sources/upload", dependencies=[Depends(_require_admin)])
+async def upload_source(
+    file: UploadFile = File(...),
+    display_name: str = Form(""),
+):
+    import core
+    import uploads
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="empty file")
+    if len(content) > 25 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="file > 25 MB")
+    try:
+        src = await uploads.upload_file(file.filename or "upload", content, display_name or None)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        print(f"[admin] upload failed: {e}")
+        raise HTTPException(status_code=502, detail=f"Nia upload failed: {e}")
+    label = (display_name.strip() or src.get("display_name")
+             or os.path.splitext(file.filename or "Upload")[0])
+    active = core.get_active_data_sources()
+    if label and label not in active:
+        active.append(label)
     _set_active_docs(active)
     return RedirectResponse("/admin", status_code=303)
 
