@@ -444,6 +444,15 @@ def _set_active_docs(docs: list[str]) -> None:
     cache.set_setting("nia_data_sources", ",".join(d.strip() for d in docs if d.strip()))
 
 
+def _invalidate_cache_after_source_change(reason: str) -> None:
+    """Any change to the active source list potentially makes existing cached
+    answers stale (citations may now point at the wrong repo set, or new
+    sources may produce a different answer). Wipe the cache so the next ask
+    re-queries Nia."""
+    n = cache.purge_cache(older_than_hours=None)
+    print(f"[admin] purged {n} cache rows after source change: {reason}")
+
+
 @router.post("/admin/sources/repo/add", dependencies=[Depends(_require_admin)])
 async def add_repo(repo: str = Form(...)):
     import core
@@ -460,6 +469,7 @@ async def add_repo(repo: str = Form(...)):
     if repo not in active:
         active.append(repo)
     _set_active_repos(active)
+    _invalidate_cache_after_source_change(f"add repo {repo}")
     return RedirectResponse("/admin", status_code=303)
 
 
@@ -468,6 +478,7 @@ async def remove_repo(repo: str = Form(...)):
     import core
     active = [r for r in core.get_active_repos() if r != repo.strip()]
     _set_active_repos(active)
+    _invalidate_cache_after_source_change(f"remove repo {repo}")
     return RedirectResponse("/admin", status_code=303)
 
 
@@ -488,6 +499,7 @@ async def add_doc(url: str = Form(...), display_name: str = Form("")):
     if label not in active:
         active.append(label)
     _set_active_docs(active)
+    _invalidate_cache_after_source_change(f"add doc {label}")
     return RedirectResponse("/admin", status_code=303)
 
 
@@ -496,6 +508,7 @@ async def remove_doc(display_name: str = Form(...)):
     import core
     active = [d for d in core.get_active_data_sources() if d != display_name.strip()]
     _set_active_docs(active)
+    _invalidate_cache_after_source_change(f"remove doc {display_name}")
     return RedirectResponse("/admin", status_code=303)
 
 
@@ -524,6 +537,7 @@ async def upload_source(
     if label and label not in active:
         active.append(label)
     _set_active_docs(active)
+    _invalidate_cache_after_source_change(f"upload {label}")
     return RedirectResponse("/admin", status_code=303)
 
 
