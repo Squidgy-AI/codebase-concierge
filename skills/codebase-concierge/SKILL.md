@@ -19,6 +19,28 @@ kind: service
 - Auto-CCs the engineer who last touched cited files (via `git blame`)
 - Modes: `eng` (default), `sales`, `marketing`, `support` — each with a tuned system prompt
 
+## Entry points (channel-agnostic)
+The reasoning core lives in `core.py`. Email is just one channel; OpenClaw / CLI / Slack call the same brain.
+
+**HTTP** — `POST /skill/ask`
+```bash
+curl -X POST https://codebase-concierge.onrender.com/skill/ask \
+  -H "Content-Type: application/json" \
+  -d '{"question":"How does Hono handle middleware composition?"}'
+```
+Returns `{answer_html, answer_md, sources, engineers}`.
+
+**Python** — `core.answer_codebase_question(question, thread_history=None) -> dict`
+```python
+from core import answer_codebase_question
+result = await answer_codebase_question("How does X work?")
+print(result["answer_md"])         # raw markdown answer
+print(result["sources"])           # list of file paths / doc URLs
+print(result["engineers"])         # [{name, email, date, source}, ...]
+```
+
+`thread_history` is an optional list of prior messages (each `{from_, text|preview}`); pass it for follow-up context.
+
 ## Setup
 1. Get API keys: trynia.ai, agentmail.to, console.anthropic.com
 2. Index your repos via the Nia plugin or CLI; capture repo IDs
