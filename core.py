@@ -37,6 +37,21 @@ claude = Anthropic(api_key=ANTHROPIC_API_KEY)
 
 # ---------- Nia ----------
 
+def get_active_repos() -> list[str]:
+    """Active repos for Nia queries: admin-managed setting overrides env var."""
+    override = (cache.get_setting("nia_repos", "") or "").strip()
+    if override:
+        return [r.strip() for r in override.split(",") if r.strip()]
+    return list(NIA_REPOS)
+
+
+def get_active_data_sources() -> list[str]:
+    override = (cache.get_setting("nia_data_sources", "") or "").strip()
+    if override:
+        return [s.strip() for s in override.split(",") if s.strip()]
+    return list(NIA_DATA_SOURCES)
+
+
 async def nia_query(question: str) -> dict:
     """Query indexed codebases. Returns {content, sources, follow_up_questions, retrieval_log_id}.
 
@@ -45,10 +60,11 @@ async def nia_query(question: str) -> dict:
     payload = {
         "mode": "query",
         "messages": [{"role": "user", "content": question}],
-        "repositories": NIA_REPOS,
+        "repositories": get_active_repos(),
     }
-    if NIA_DATA_SOURCES:
-        payload["data_sources"] = NIA_DATA_SOURCES
+    ds = get_active_data_sources()
+    if ds:
+        payload["data_sources"] = ds
 
     async with httpx.AsyncClient(timeout=60) as client:
         r = await client.post(
@@ -58,6 +74,53 @@ async def nia_query(question: str) -> dict:
         )
         r.raise_for_status()
         return r.json()
+
+
+async def nia_list_sources() -> list[dict]:
+    """List every source we have indexed in Nia (repos + docs)."""
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.get(
+            f"{NIA_BASE}/v2/sources",
+            headers={"Authorization": f"Bearer {NIA_API_KEY}"},
+        )
+        r.raise_for_status()
+        return (r.json() or {}).get("items", [])
+
+
+async def nia_index_repo(repo: str) -> dict:
+    """Trigger Nia indexing on a public org/repo. Returns the source row."""
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(
+            f"{NIA_BASE}/v2/sources",
+            headers={"Authorization": f"Bearer {NIA_API_KEY}"},
+            json={"type": "repository", "repository": repo.strip()},
+        )
+        r.raise_for_status()
+        return r.json()
+
+
+async def nia_index_doc(url: str, display_name: str | None = None) -> dict:
+    """Trigger Nia indexing on a documentation URL. Returns the source row.
+    If display_name is provided, set it via the PATCH endpoint right after."""
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.post(
+            f"{NIA_BASE}/v2/sources",
+            headers={"Authorization": f"Bearer {NIA_API_KEY}"},
+            json={"type": "documentation", "url": url.strip()},
+        )
+        r.raise_for_status()
+        src = r.json()
+        if display_name:
+            try:
+                await client.patch(
+                    f"{NIA_BASE}/v2/sources/{src['id']}",
+                    headers={"Authorization": f"Bearer {NIA_API_KEY}"},
+                    json={"display_name": display_name.strip()},
+                )
+                src["display_name"] = display_name.strip()
+            except httpx.HTTPError:
+                pass
+        return src
 
 
 # ---------- Source normalization ----------

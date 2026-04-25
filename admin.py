@@ -88,6 +88,8 @@ def render() -> str:
     cc_enabled = cache.get_setting("auto_cc_enabled", "0") == "1"
     s = cache.stats()
     prompts = {m: core.get_prompt(m) for m in ("eng", "sales", "marketing", "support")}
+    active_repos = core.get_active_repos()
+    active_docs = core.get_active_data_sources()
 
     user_rows = "\n".join(_user_row(u) for u in users) or (
         '<tr><td colspan="4" style="color:#999;text-align:center;padding:18px">'
@@ -99,6 +101,24 @@ def render() -> str:
     )
     lock_state = "ON — unknown senders are logged and ignored" if lockdown else "OFF — unknown senders get answered (and still flagged)"
     cc_state = "ON — engineers in allowed domains will be CC'd on replies" if cc_enabled else "OFF — engineers shown in email body only, never CC'd"
+
+    repos_rows = "".join(
+        f'<tr><td><a href="https://github.com/{html.escape(r)}" target="_blank">{html.escape(r)}</a></td>'
+        f'<td><form method="post" action="/admin/sources/repo/remove" style="margin:0">'
+        f'  <input type="hidden" name="repo" value="{html.escape(r)}">'
+        f'  <button class="link-btn" type="submit" onclick="return confirm(\'Remove {html.escape(r)} from active list?\')">remove</button>'
+        f'</form></td></tr>'
+        for r in active_repos
+    ) or '<tr><td colspan="2" style="color:#999;text-align:center;padding:18px">No repos active.</td></tr>'
+
+    docs_rows = "".join(
+        f'<tr><td><span style="color:#a8479a">{html.escape(d)}</span></td>'
+        f'<td><form method="post" action="/admin/sources/doc/remove" style="margin:0">'
+        f'  <input type="hidden" name="display_name" value="{html.escape(d)}">'
+        f'  <button class="link-btn" type="submit" onclick="return confirm(\'Remove {html.escape(d)} from active list?\')">remove</button>'
+        f'</form></td></tr>'
+        for d in active_docs
+    ) or '<tr><td colspan="2" style="color:#999;text-align:center;padding:18px">No doc sources active.</td></tr>'
 
     prompts_html = "".join(
         f'<form method="post" action="/admin/prompt" style="margin-bottom:16px">'
@@ -197,6 +217,32 @@ def render() -> str:
     </div>
 
     <div class="panel">
+      <h2 style="margin-top:0">Indexed sources</h2>
+      <p class="sub" style="margin:-4px 0 12px">These are the repos and doc sites the brain searches against. Adding indexes them in Nia and adds them to the active list.</p>
+
+      <h3 style="font-size:13px;margin:12px 0 6px;color:#555">Repositories ({len(active_repos)})</h3>
+      <table>
+        <thead><tr><th>Repo</th><th></th></tr></thead>
+        <tbody>{repos_rows}</tbody>
+      </table>
+      <form method="post" action="/admin/sources/repo/add" class="form-row">
+        <input type="text" name="repo" required placeholder="org/repo (e.g. honojs/middleware)">
+        <button type="submit">Add &amp; index</button>
+      </form>
+
+      <h3 style="font-size:13px;margin:18px 0 6px;color:#555">Documentation sources ({len(active_docs)})</h3>
+      <table>
+        <thead><tr><th>Display name</th><th></th></tr></thead>
+        <tbody>{docs_rows}</tbody>
+      </table>
+      <form method="post" action="/admin/sources/doc/add" class="form-row">
+        <input type="text" name="url" required placeholder="https://docs.example.com">
+        <input type="text" name="display_name" placeholder="display name (e.g. Acme Docs)">
+        <button type="submit">Add &amp; index</button>
+      </form>
+    </div>
+
+    <div class="panel">
       <h2 style="margin-top:0">Mode prompts</h2>
       <p class="sub" style="margin:-4px 0 12px">These are the Claude system prompts for each mode. Edit and save to override; reset clears the override and falls back to the baked-in default.</p>
       {prompts_html}
@@ -281,6 +327,69 @@ async def set_lockdown(enabled: int = Form(...)):
 @router.post("/admin/auto_cc", dependencies=[Depends(_require_admin)])
 async def set_auto_cc(enabled: int = Form(...)):
     cache.set_setting("auto_cc_enabled", "1" if int(enabled) else "0")
+    return RedirectResponse("/admin", status_code=303)
+
+
+def _set_active_repos(repos: list[str]) -> None:
+    cache.set_setting("nia_repos", ",".join(r.strip() for r in repos if r.strip()))
+
+
+def _set_active_docs(docs: list[str]) -> None:
+    cache.set_setting("nia_data_sources", ",".join(d.strip() for d in docs if d.strip()))
+
+
+@router.post("/admin/sources/repo/add", dependencies=[Depends(_require_admin)])
+async def add_repo(repo: str = Form(...)):
+    import core
+    repo = (repo or "").strip()
+    if "/" not in repo:
+        raise HTTPException(status_code=400, detail="expected 'org/repo'")
+    try:
+        await core.nia_index_repo(repo)
+    except Exception as e:
+        # Common case: Nia rejects private/auth-required repos. Surface but still accept
+        # the addition so the operator can fix the index out-of-band.
+        print(f"[admin] nia_index_repo failed for {repo}: {e}")
+    active = core.get_active_repos()
+    if repo not in active:
+        active.append(repo)
+    _set_active_repos(active)
+    return RedirectResponse("/admin", status_code=303)
+
+
+@router.post("/admin/sources/repo/remove", dependencies=[Depends(_require_admin)])
+async def remove_repo(repo: str = Form(...)):
+    import core
+    active = [r for r in core.get_active_repos() if r != repo.strip()]
+    _set_active_repos(active)
+    return RedirectResponse("/admin", status_code=303)
+
+
+@router.post("/admin/sources/doc/add", dependencies=[Depends(_require_admin)])
+async def add_doc(url: str = Form(...), display_name: str = Form("")):
+    import core
+    url = (url or "").strip()
+    name = (display_name or "").strip()
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="expected an http(s) URL")
+    try:
+        src = await core.nia_index_doc(url, display_name=name or None)
+    except Exception as e:
+        print(f"[admin] nia_index_doc failed for {url}: {e}")
+        src = {}
+    label = name or src.get("display_name") or url
+    active = core.get_active_data_sources()
+    if label not in active:
+        active.append(label)
+    _set_active_docs(active)
+    return RedirectResponse("/admin", status_code=303)
+
+
+@router.post("/admin/sources/doc/remove", dependencies=[Depends(_require_admin)])
+async def remove_doc(display_name: str = Form(...)):
+    import core
+    active = [d for d in core.get_active_data_sources() if d != display_name.strip()]
+    _set_active_docs(active)
     return RedirectResponse("/admin", status_code=303)
 
 
