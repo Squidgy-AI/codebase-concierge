@@ -23,6 +23,34 @@ Each mode = different system prompt + different Nia search strategy.
 **Strategy: ship engineering mode rock-solid. Tease the others on the architecture slide
 and in Q&A. Don't half-build sales/marketing modes — broken modes hurt more than absent ones.**
 
+## Memory layer (shared memory across workflows — hackathon theme)
+The organizers explicitly called out **shared memory across workflows** as a desired theme.
+Our build hits this naturally:
+
+**MVP — Q&A cache (SQLite, ~30 lines):**
+- Every answered question + its Nia response is stored: `(question_embedding, answer_html, sources, timestamp)`
+- On each new email, embed the question and check cache first (cosine similarity > 0.92)
+- Cache hit → reply instantly, skip Nia entirely. Saves quota, kills latency.
+- Cache miss → normal flow, then write to cache.
+
+**Why this matters:**
+- Solves the **quota crisis** (47/50 used, 3 left)
+- Solves the **25s Nia latency** (cache hits return in <1s)
+- Genuine **"memory across workflows"** — every email thread contributes
+- Demo magic: "send the same question twice, second one returns instantly with 'previously answered for [PM name] on Wednesday'"
+
+**v2 narrative for the demo (don't build, just talk):**
+- Today: SQLite cache, single-tenant
+- Next: Nia **vaults** (`nia vault`) — Karpathy-style persistent wikis backed by Nia sources, with `dream` cycles that find non-obvious connections across past answers and detect contradictions. The cache becomes the org's accumulated knowledge graph.
+
+**Implementation order:** add cache only AFTER engineering mode end-to-end works. Don't optimize until there's something to optimize.
+
+## Themes from organizers (hit list)
+1. ✅ **Shared memory across workflows** → SQLite cache (MVP) + Nia vaults (roadmap)
+2. ✅ **Agent harnesses (OpenClaw)** → ship as OpenClaw skill (`skills/codebase-concierge/SKILL.md`)
+3. ⏭️ **OAuth (Composio)** → skip; AgentMail already handles auth, would feel bolted-on
+4. ⏭️ **Inference routing** → skip; 1-hour rabbit hole, marginal demo value
+
 ## OpenClaw alignment (the meta-pitch)
 The hackathon is hosted by Eragon (enterprise OpenClaw). OpenClaw's thesis: **personal AI
 agents that live in the messaging platforms you already use**. 100k+ GitHub stars in week one.
@@ -61,6 +89,16 @@ Stub already exists in the repo — fill it in if time. Signals ecosystem fluenc
 ```
 
 One process. No DB. No queue. Thread state lives in AgentMail itself.
+
+## Agent team roles (if using teams)
+Keep `main.py` work on a single agent. Sidecar agents only for tasks that don't touch code:
+
+- **main** (you, single agent): builds `main.py`, owns API integration, drives end-to-end. Does NOT delegate `main.py` edits.
+- **demo-builder** (sidecar): drafts the 5-slide demo deck + 10 canned demo email questions tuned to Hono. Read-only on code. Output: `demo/deck.md` + `demo/questions.md`.
+- **visual-qa** (sidecar, late in day): once webhook replies are working, sends test emails to a Gmail/Outlook account and verifies HTML renders correctly across clients. Read-only on code. Reports issues back to main.
+- **vault-researcher** (sidecar, optional): investigates whether Nia has a vault append/write API for runtime memory writes. Strengthens v2 Q&A. Pure research, no code.
+
+**Do NOT** split `main.py` across agents. Linear dependency chain (webhook → Nia → cache → Claude → AgentMail) means coordination cost > parallelism gain at this scale. Stability is judging criterion #2; merge conflicts at 5pm = death.
 
 ## Stack
 - Python 3.11 + FastAPI + uvicorn
@@ -119,18 +157,21 @@ a dict of system prompts per mode, and route in the webhook handler. ~20 lines t
 - Don't skip path validation — hallucinated `src/foo/bar.ts` cites kill credibility.
 
 ## Demo script (3 min + 2 min Q&A)
-1. **20s** — Hook: "OpenClaw's thesis is that AI agents should live in the messaging platforms you already use. We applied that to the one knowledge base that's truest and least readable in any company — the codebase. Your code is the source of truth for what your product does. We built an inbox that translates it for everyone who can't read it."
-2. **30s** — Show inbox. Send live email: "How does Hono handle middleware composition?"
-3. **45s** — Reply arrives with cited file:line refs. Click through one — it's real.
-4. **25s** — Follow-up in thread: "What about error handling in middleware?" — thread context preserved.
-5. **25s** — Auto-CC differentiator: agent looped in the engineer who last touched that code via git blame.
-6. **35s** — Architecture + roadmap slide: Nia (brain) + AgentMail (voice) in ~200 lines. Same brain, different voices via skills: sales asks capability questions, marketing asks "what shipped", support asks "bug or feature". One inbox per role. Ships as an OpenClaw skill — drop it into your personal agent and your codebase becomes queryable from any messaging channel.
+1. **20s** — Hook: "OpenClaw's thesis is that AI agents should live in the messaging platforms you already use. We applied that to the one knowledge base that's truest and least readable in any company — the codebase. Brain, voice, and memory."
+2. **25s** — Show inbox. Send live email: "How does Hono handle middleware composition?"
+3. **35s** — Reply arrives with cited file:line refs. Click through one — it's real.
+4. **20s** — Follow-up in thread: "What about error handling in middleware?" — thread context preserved.
+5. **25s** — **Memory moment:** send a near-duplicate question from a different sender. Reply returns in <1s with "previously answered for [original sender] on [date]" — agent's memory layer hit. (Pre-warm the cache before demo with this exact question.)
+6. **20s** — Auto-CC differentiator: agent looped in the engineer who last touched that code via git blame.
+7. **35s** — Architecture + roadmap slide: **Brain** (Nia) + **Voice** (AgentMail) + **Memory** (SQLite cache today, Nia vaults next) in ~250 lines. Same brain, different voices via skills: sales asks capability questions, marketing asks "what shipped", support asks "bug or feature". Ships as an OpenClaw skill — drop into any personal agent.
 
 **Q&A prep:**
 - "Why not Slack?" → email is async, has threading, works across orgs (sales asking about partner's API), and AgentMail's two-way threading is uniquely suited.
 - "What about hallucinations?" → path validation rejects any cite that isn't in the index. Show the validator code if asked.
 - "Privacy?" → Nia indexes are scoped per customer; same auth model as GitHub Apps.
 - "How is this different from Cursor/Claude Code?" → those are IDE tools for engineers. This is for everyone who *can't* open the IDE.
+- "How does the memory work?" → today: SQLite of (question_embedding → answer + sources). Cache hit if cosine sim > 0.92. Next: Nia vaults — Karpathy-style persistent wikis with dream cycles that find connections across answered questions and detect contradictions over time.
+- "Why not just use Nia vaults from day one?" → vault auto-ingestion is source-driven, not runtime-driven; there's no first-class 'append-from-agent' API yet. SQLite gets us the behavior today; vault integration is the natural next step.
 
 ## API references (live links)
 - Nia API: https://docs.trynia.ai/welcome

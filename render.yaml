@@ -3,7 +3,10 @@ services:
     name: codebase-concierge
     runtime: python
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: |
+      pip install -r requirements.txt
+      mkdir -p repos
+      [ -d repos/hono ] || git clone --depth=300 https://github.com/honojs/hono.git repos/hono
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: ANTHROPIC_API_KEY
@@ -18,3 +21,7 @@ services:
         sync: false
       - key: NIA_DATA_SOURCES
         sync: false
+      - key: AUTO_CC_DOMAINS
+        value: users.noreply.github.com
+      - key: REPOS_DIR
+        value: repos
