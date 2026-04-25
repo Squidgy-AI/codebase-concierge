@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: codebase-concierge
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: NIA_API_KEY
+        sync: false
+      - key: AGENTMAIL_API_KEY
+        sync: false
+      - key: AGENTMAIL_INBOX_ID
+        sync: false
+      - key: NIA_REPOS
+        sync: false
+      - key: NIA_DATA_SOURCES
+        sync: false
