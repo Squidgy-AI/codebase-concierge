@@ -55,11 +55,23 @@ def _init_db() -> None:
               sources_json        TEXT NOT NULL,
               engineers_json      TEXT NOT NULL,
               original_sender     TEXT,
-              created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+              created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+              hit_count           INTEGER NOT NULL DEFAULT 0,
+              last_hit_at         TEXT,
+              last_hit_sender     TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_qa_signature ON qa_cache(question_signature);
             """
         )
+        # Backwards compat for early demos that created the table without hit columns.
+        existing = {r[1] for r in conn.execute("PRAGMA table_info(qa_cache)").fetchall()}
+        for col, ddl in [
+            ("hit_count", "ALTER TABLE qa_cache ADD COLUMN hit_count INTEGER NOT NULL DEFAULT 0"),
+            ("last_hit_at", "ALTER TABLE qa_cache ADD COLUMN last_hit_at TEXT"),
+            ("last_hit_sender", "ALTER TABLE qa_cache ADD COLUMN last_hit_sender TEXT"),
+        ]:
+            if col not in existing:
+                conn.execute(ddl)
     _initialized = True
 
 
@@ -72,8 +84,9 @@ def _signature(question: str) -> str:
     return " ".join(sorted(keep))
 
 
-def lookup(question: str, threshold: float = 0.85) -> dict | None:
+def lookup(question: str, threshold: float = 0.85, hit_sender: str | None = None) -> dict | None:
     """Return the cached payload if a sufficiently similar question exists.
+    Records the hit (count + last_hit_at + last_hit_sender) for the dashboard.
 
     Result: {
         "answer_html", "answer_md", "sources", "engineers",
@@ -85,28 +98,30 @@ def lookup(question: str, threshold: float = 0.85) -> dict | None:
     if not sig:
         return None
     with _connect() as conn:
-        # Exact-signature short-circuit (fast).
         row = conn.execute(
             "SELECT * FROM qa_cache WHERE question_signature = ? "
             "ORDER BY created_at DESC LIMIT 1",
             (sig,),
         ).fetchone()
-        if row:
-            return _row_to_payload(row)
-
-        # Fuzzy fallback: walk the table, score against the signature.
-        rows = conn.execute(
-            "SELECT * FROM qa_cache ORDER BY created_at DESC LIMIT 200"
-        ).fetchall()
-
-    best, best_score = None, 0.0
-    for r in rows:
-        score = SequenceMatcher(None, sig, r["question_signature"]).ratio()
-        if score > best_score:
-            best, best_score = r, score
-    if best and best_score >= threshold:
-        return _row_to_payload(best)
-    return None
+        if not row:
+            rows = conn.execute(
+                "SELECT * FROM qa_cache ORDER BY created_at DESC LIMIT 200"
+            ).fetchall()
+            best, best_score = None, 0.0
+            for r in rows:
+                score = SequenceMatcher(None, sig, r["question_signature"]).ratio()
+                if score > best_score:
+                    best, best_score = r, score
+            if best and best_score >= threshold:
+                row = best
+        if not row:
+            return None
+        # Record the hit so the dashboard can show "asked X times".
+        conn.execute(
+            "UPDATE qa_cache SET hit_count = hit_count + 1, last_hit_at = ?, last_hit_sender = ? WHERE id = ?",
+            (datetime.now(timezone.utc).isoformat(timespec="seconds"), hit_sender, row["id"]),
+        )
+        return _row_to_payload(row)
 
 
 def store(
@@ -138,6 +153,41 @@ def store(
                 datetime.now(timezone.utc).isoformat(timespec="seconds"),
             ),
         )
+
+
+def recent(limit: int = 30) -> list[dict]:
+    """Return the most recent cached Q&A rows for the dashboard."""
+    _init_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM qa_cache ORDER BY COALESCE(last_hit_at, created_at) DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [_row_to_dict(r) for r in rows]
+
+
+def stats() -> dict:
+    _init_db()
+    with _connect() as conn:
+        total = conn.execute("SELECT COUNT(*) FROM qa_cache").fetchone()[0]
+        hits = conn.execute("SELECT COALESCE(SUM(hit_count), 0) FROM qa_cache").fetchone()[0]
+    return {"questions": total, "cache_hits": hits}
+
+
+def _row_to_dict(row: sqlite3.Row) -> dict:
+    """Plain dict for dashboard rendering (NOT the payload shape used by lookup)."""
+    return {
+        "id": row["id"],
+        "question": row["question"],
+        "answer_html": row["answer_html"],
+        "sources": json.loads(row["sources_json"]),
+        "engineers": json.loads(row["engineers_json"]),
+        "original_sender": row["original_sender"],
+        "created_at": row["created_at"],
+        "hit_count": row["hit_count"],
+        "last_hit_at": row["last_hit_at"],
+        "last_hit_sender": row["last_hit_sender"],
+    }
 
 
 def _row_to_payload(row: sqlite3.Row) -> dict:

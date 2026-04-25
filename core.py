@@ -341,7 +341,7 @@ async def answer_codebase_question(
     cacheable = not (thread_history and len(thread_history) > 0)
     cache_key = f"[{mode}] {question}"
     if cacheable:
-        hit = cache.lookup(cache_key)
+        hit = cache.lookup(cache_key, hit_sender=sender)
         if hit:
             hit["answer_html"] = _prepend_cache_note(
                 hit["answer_html"], hit["original_sender"], hit["original_date"]

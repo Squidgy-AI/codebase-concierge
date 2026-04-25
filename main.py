@@ -9,6 +9,7 @@ import os
 import urllib.parse
 import httpx
 from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -16,6 +17,7 @@ load_dotenv()
 
 # core handles its own ANTHROPIC_API_KEY / NIA_* env loading
 import core  # noqa: E402
+import dashboard  # noqa: E402
 
 
 def _clean_secret(name: str) -> str:
@@ -122,6 +124,11 @@ async def skill_ask(req: AskRequest):
     return await core.answer_codebase_question(
         req.question, req.thread_history, sender=req.sender, mode=mode,
     )
+
+
+@app.get("/", response_class=HTMLResponse)
+async def index():
+    return dashboard.render()
 
 
 @app.get("/healthz")
