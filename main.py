@@ -87,7 +87,7 @@ async def agentmail_webhook(request: Request):
     question = f"{subject}\n\n{body}".strip()
     history = await get_thread_messages(thread_id) if thread_id else []
 
-    result = await core.answer_codebase_question(question, history)
+    result = await core.answer_codebase_question(question, history, sender=sender)
 
     cc = [
         e["email"] for e in result["engineers"]
@@ -107,13 +107,14 @@ async def agentmail_webhook(request: Request):
 class AskRequest(BaseModel):
     question: str
     thread_history: list[dict] | None = None
+    sender: str | None = None
 
 
 @app.post("/skill/ask")
 async def skill_ask(req: AskRequest):
     """Channel-agnostic ask endpoint — same brain as the email channel.
-    Returns {answer_html, answer_md, sources, engineers}."""
-    return await core.answer_codebase_question(req.question, req.thread_history)
+    Returns {answer_html, answer_md, sources, engineers, cache_hit, ...}."""
+    return await core.answer_codebase_question(req.question, req.thread_history, sender=req.sender)
 
 
 @app.get("/healthz")

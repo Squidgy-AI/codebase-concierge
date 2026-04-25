@@ -11,6 +11,8 @@ import subprocess
 import httpx
 from anthropic import Anthropic
 
+import cache
+
 
 def _clean_secret(name: str) -> str:
     """Strip whitespace and zero-width chars often introduced by copy-paste.
@@ -216,9 +218,17 @@ def compose_answer_html(
 
 # ---------- Public entry point ----------
 
+def _prepend_cache_note(html: str, original_sender: str | None, original_date: str) -> str:
+    """Prepend the demo's "previously answered" line to a cached HTML answer."""
+    who = original_sender or "another teammate"
+    note = f'<p><em>Previously answered for {who} on {original_date}.</em></p>'
+    return note + html
+
+
 async def answer_codebase_question(
     question: str,
     thread_history: list[dict] | None = None,
+    sender: str | None = None,
 ) -> dict:
     """Channel-agnostic Q&A over indexed codebases.
 
@@ -226,6 +236,9 @@ async def answer_codebase_question(
         question: Natural-language question.
         thread_history: Optional list of prior messages
             (each {from_, text|preview}); used as context for follow-ups.
+        sender: Optional asker identifier (email/handle). Cached on first
+            answer; surfaced in the "previously answered for X" note on
+            subsequent hits.
 
     Returns:
         {
@@ -233,16 +246,35 @@ async def answer_codebase_question(
           "answer_md": str,          # raw markdown answer (Nia's draft, less polish)
           "sources": list[str],      # normalized: GitHub paths or doc URLs
           "engineers": list[dict],   # [{name, email, date, source}], from git blame
+          "cache_hit": bool,
+          "original_sender": str | None,  # only present on cache_hit
+          "original_date":   str,         # only present on cache_hit
         }
     """
+    # Don't cache follow-ups — thread context shifts the answer.
+    cacheable = not (thread_history and len(thread_history) > 0)
+    if cacheable:
+        hit = cache.lookup(question)
+        if hit:
+            hit["answer_html"] = _prepend_cache_note(
+                hit["answer_html"], hit["original_sender"], hit["original_date"]
+            )
+            return hit
+
     history = thread_history or []
     nia_context = await nia_query(question)
     sources = _normalize_sources(nia_context.get("sources", []))
     engineers = cited_engineers(sources)
     answer_html = compose_answer_html(question, nia_context, history, engineers)
+    answer_md = nia_context.get("content", "")
+
+    if cacheable:
+        cache.store(question, answer_html, answer_md, sources, engineers, sender)
+
     return {
         "answer_html": answer_html,
-        "answer_md": nia_context.get("content", ""),
+        "answer_md": answer_md,
         "sources": sources,
         "engineers": engineers,
+        "cache_hit": False,
     }

@@ -17,6 +17,7 @@ kind: service
 ## What it does
 - Receives email → classifies role/mode → queries Nia for code context → composes cited answer → threaded reply via AgentMail
 - Auto-CCs the engineer who last touched cited files (via `git blame`)
+- Caches answers in SQLite — duplicate questions return in <1s with "previously answered for X on Y"
 - Modes: `eng` (default), `sales`, `marketing`, `support` — each with a tuned system prompt
 
 ## Entry points (channel-agnostic)
