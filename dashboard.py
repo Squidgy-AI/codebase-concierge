@@ -175,7 +175,7 @@ def render() -> str:
 <body>
   <div class="wrap">
     <h1>Codebase Concierge — live log</h1>
-    <div class="sub">One brain, two channels. Ask via email <code>codebaseconcierge@agentmail.to</code> or right here. <a href="/admin" style="margin-left:8px">admin</a></div>
+    <div class="sub">One brain, two channels. Ask via email <code>codebaseconcierge@agentmail.to</code> or right here. <a href="/demo" style="margin-left:8px">demo</a> · <a href="/admin">admin</a></div>
 
     <div class="chat">
       <div class="chat-row">
@@ -283,8 +283,16 @@ def render() -> str:
       }} catch (e) {{ /* swallow */ }}
     }});
 
+    // Pre-fill from ?question= / ?mode= / ?sender= so /demo can deep-link into a scenario.
+    const params = new URLSearchParams(location.search);
+    if (params.get('question')) q.value = params.get('question');
+    if (params.get('mode'))     m.value = params.get('mode');
+    if (params.get('sender'))   s.value = params.get('sender');
+
     refreshFeed();
-    loadUsers();
+    loadUsers().then(() => {{
+      if (params.get('autosend') === '1' && q.value.trim()) ask();
+    }});
     setInterval(refreshFeed, 5000);
   </script>
 </body>

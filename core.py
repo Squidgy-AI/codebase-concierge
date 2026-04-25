@@ -212,6 +212,23 @@ def _parse_sender_modes(raw: str) -> dict[str, str]:
 SENDER_MODES = _parse_sender_modes(os.environ.get("SENDER_MODES", ""))
 
 
+def _seed_users_from_env() -> None:
+    """Bootstrap the users table from SENDER_MODES so admin/autocomplete sees them.
+    Domain entries (@example.com) are skipped — only exact emails become user rows.
+    Existing rows are not touched."""
+    for key, mode in SENDER_MODES.items():
+        if "@" not in key or key.startswith("@"):
+            continue
+        if cache.lookup_user(key) is None:
+            try:
+                cache.upsert_user(key, None, mode)
+            except ValueError:
+                pass
+
+
+_seed_users_from_env()
+
+
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w.-]+")
 
 

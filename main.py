@@ -20,6 +20,7 @@ import cache  # noqa: E402
 import core  # noqa: E402
 import dashboard  # noqa: E402
 import admin  # noqa: E402
+import demo  # noqa: E402
 
 
 def _clean_secret(name: str) -> str:
@@ -146,6 +147,11 @@ async def index():
 async def feed_fragment():
     """Stats + feed HTML fragment, polled by the dashboard for live updates."""
     return dashboard.render_feed_html()
+
+
+@app.get("/demo", response_class=HTMLResponse)
+async def demo_page():
+    return demo.render()
 
 
 @app.get("/healthz")
