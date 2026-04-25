@@ -13,9 +13,20 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
-NIA_API_KEY = os.environ["NIA_API_KEY"]
-AGENTMAIL_API_KEY = os.environ["AGENTMAIL_API_KEY"]
+
+def _clean_secret(name: str) -> str:
+    """Strip whitespace and zero-width chars often introduced by copy-paste.
+    Anthropic/AgentMail API keys must be pure ASCII for HTTP headers."""
+    raw = os.environ[name]
+    cleaned = "".join(ch for ch in raw if ch.isprintable() and ord(ch) < 128).strip()
+    if cleaned != raw:
+        print(f"[startup] {name}: stripped {len(raw) - len(cleaned)} non-ASCII/invisible chars")
+    return cleaned
+
+
+ANTHROPIC_API_KEY = _clean_secret("ANTHROPIC_API_KEY")
+NIA_API_KEY = _clean_secret("NIA_API_KEY")
+AGENTMAIL_API_KEY = _clean_secret("AGENTMAIL_API_KEY")
 AGENTMAIL_INBOX_ID = os.environ["AGENTMAIL_INBOX_ID"]
 # Comma-separated "org/repo" identifiers (Nia uses string names, not UUIDs).
 NIA_REPOS = [r.strip() for r in os.environ["NIA_REPOS"].split(",") if r.strip()]
