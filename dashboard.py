@@ -175,7 +175,7 @@ def render() -> str:
 <body>
   <div class="wrap">
     <h1>Codebase Concierge — live log</h1>
-    <div class="sub">One brain, two channels. Ask via email <code>codebaseconcierge@agentmail.to</code> or right here.</div>
+    <div class="sub">One brain, two channels. Ask via email <code>codebaseconcierge@agentmail.to</code> or right here. <a href="/admin" style="margin-left:8px">admin</a></div>
 
     <div class="chat">
       <div class="chat-row">
@@ -185,7 +185,8 @@ def render() -> str:
           <option value="marketing">marketing</option>
           <option value="support">support</option>
         </select>
-        <input class="sender" id="sender" type="text" placeholder="from (e.g. you@team.com)">
+        <input class="sender" id="sender" type="text" list="users" autocomplete="off" placeholder="from (e.g. you@team.com)">
+        <datalist id="users"></datalist>
       </div>
       <div class="chat-row">
         <textarea id="question" rows="1" placeholder="Ask anything about the indexed codebase…"></textarea>
@@ -258,7 +259,32 @@ def render() -> str:
       if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) ask();
     }});
 
+    async function loadUsers() {{
+      try {{
+        const r = await fetch('/api/users');
+        if (!r.ok) return;
+        const list = await r.json();
+        const dl = document.getElementById('users');
+        dl.innerHTML = list.map(u => {{
+          const label = u.display_name ? `${{u.display_name}} <${{u.email}}>` : u.email;
+          return `<option value="${{u.email}}" label="${{label}} · ${{u.default_mode}}">`;
+        }}).join('');
+      }} catch (e) {{ /* swallow */ }}
+    }}
+
+    // When the user picks a known address, snap the mode dropdown to their default.
+    s.addEventListener('change', async () => {{
+      try {{
+        const r = await fetch('/api/users');
+        if (!r.ok) return;
+        const list = await r.json();
+        const hit = list.find(u => u.email.toLowerCase() === s.value.trim().toLowerCase());
+        if (hit) m.value = hit.default_mode;
+      }} catch (e) {{ /* swallow */ }}
+    }});
+
     refreshFeed();
+    loadUsers();
     setInterval(refreshFeed, 5000);
   </script>
 </body>

@@ -61,6 +61,28 @@ def _init_db() -> None:
               last_hit_sender     TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_qa_signature ON qa_cache(question_signature);
+
+            CREATE TABLE IF NOT EXISTS users (
+              email         TEXT PRIMARY KEY COLLATE NOCASE,
+              display_name  TEXT,
+              default_mode  TEXT NOT NULL DEFAULT 'eng',
+              created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS flagged_senders (
+              id          INTEGER PRIMARY KEY AUTOINCREMENT,
+              sender      TEXT NOT NULL,
+              subject     TEXT,
+              preview     TEXT,
+              created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+              resolved    INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_flagged_sender ON flagged_senders(sender);
+
+            CREATE TABLE IF NOT EXISTS settings (
+              key   TEXT PRIMARY KEY,
+              value TEXT NOT NULL
+            );
             """
         )
         # Backwards compat for early demos that created the table without hit columns.
@@ -171,7 +193,114 @@ def stats() -> dict:
     with _connect() as conn:
         total = conn.execute("SELECT COUNT(*) FROM qa_cache").fetchone()[0]
         hits = conn.execute("SELECT COALESCE(SUM(hit_count), 0) FROM qa_cache").fetchone()[0]
-    return {"questions": total, "cache_hits": hits}
+        flagged = conn.execute(
+            "SELECT COUNT(*) FROM flagged_senders WHERE resolved = 0"
+        ).fetchone()[0]
+    return {"questions": total, "cache_hits": hits, "flagged_senders": flagged}
+
+
+# ---------- Users ----------
+
+def list_users() -> list[dict]:
+    _init_db()
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT email, display_name, default_mode, created_at "
+            "FROM users ORDER BY created_at DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def upsert_user(email: str, display_name: str | None, default_mode: str) -> None:
+    _init_db()
+    email = (email or "").strip().lower()
+    if not email or "@" not in email:
+        raise ValueError("invalid email")
+    if default_mode not in ("eng", "sales", "marketing", "support"):
+        raise ValueError("invalid mode")
+    with _lock, _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO users (email, display_name, default_mode)
+                 VALUES (?, ?, ?)
+            ON CONFLICT(email) DO UPDATE SET
+              display_name = excluded.display_name,
+              default_mode = excluded.default_mode
+            """,
+            (email, (display_name or "").strip() or None, default_mode),
+        )
+
+
+def delete_user(email: str) -> None:
+    _init_db()
+    with _lock, _connect() as conn:
+        conn.execute("DELETE FROM users WHERE email = ?", ((email or "").strip().lower(),))
+
+
+def lookup_user(email: str) -> dict | None:
+    """Returns {email, display_name, default_mode, ...} or None."""
+    _init_db()
+    if not email:
+        return None
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT email, display_name, default_mode FROM users WHERE email = ?",
+            (email.strip().lower(),),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+# ---------- Flagged senders ----------
+
+def flag_sender(sender: str, subject: str | None, preview: str | None) -> None:
+    _init_db()
+    with _lock, _connect() as conn:
+        conn.execute(
+            "INSERT INTO flagged_senders (sender, subject, preview) VALUES (?, ?, ?)",
+            (sender, subject, (preview or "")[:300] if preview else None),
+        )
+
+
+def list_flagged(limit: int = 50, only_unresolved: bool = True) -> list[dict]:
+    _init_db()
+    with _connect() as conn:
+        if only_unresolved:
+            rows = conn.execute(
+                "SELECT * FROM flagged_senders WHERE resolved = 0 "
+                "ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM flagged_senders ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def resolve_flagged(flag_id: int) -> None:
+    _init_db()
+    with _lock, _connect() as conn:
+        conn.execute("UPDATE flagged_senders SET resolved = 1 WHERE id = ?", (flag_id,))
+
+
+# ---------- Settings ----------
+
+def get_setting(key: str, default: str | None = None) -> str | None:
+    _init_db()
+    with _connect() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting(key: str, value: str) -> None:
+    _init_db()
+    with _lock, _connect() as conn:
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict:

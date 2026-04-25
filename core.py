@@ -227,8 +227,9 @@ def detect_mode(sender: str | None, subject: str | None) -> str:
 
     Precedence:
       1. Explicit subject tag: [sales] / [marketing] / [support] / [eng]
-      2. Sender map (env: SENDER_MODES) — exact email beats domain
-      3. Default: eng
+      2. Users table (admin-managed) — exact email match
+      3. Sender map (env: SENDER_MODES) — exact email beats domain
+      4. Default: eng
     """
     s = (subject or "").lower()
     for mode in ("sales", "marketing", "support", "eng"):
@@ -237,6 +238,9 @@ def detect_mode(sender: str | None, subject: str | None) -> str:
 
     email = _extract_email(sender)
     if email:
+        u = cache.lookup_user(email)
+        if u:
+            return u["default_mode"]
         if email in SENDER_MODES:
             return SENDER_MODES[email]
         domain = email.split("@", 1)[1] if "@" in email else None

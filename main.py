@@ -16,8 +16,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # core handles its own ANTHROPIC_API_KEY / NIA_* env loading
+import cache  # noqa: E402
 import core  # noqa: E402
 import dashboard  # noqa: E402
+import admin  # noqa: E402
 
 
 def _clean_secret(name: str) -> str:
@@ -35,6 +37,7 @@ AUTO_CC_DOMAINS = [d.strip().lower() for d in os.environ.get("AUTO_CC_DOMAINS", 
 AGENTMAIL_BASE = "https://api.agentmail.to/v0"
 
 app = FastAPI()
+app.include_router(admin.router)
 
 
 # ---------- AgentMail ----------
@@ -85,6 +88,14 @@ async def agentmail_webhook(request: Request):
 
     if AGENTMAIL_INBOX_ID and AGENTMAIL_INBOX_ID.lower() in sender.lower():
         return {"ok": True, "skipped": "self"}
+
+    # Unknown-sender handling: always log; optionally ignore based on lockdown setting.
+    sender_email = core._extract_email(sender)
+    known = bool(sender_email and cache.lookup_user(sender_email))
+    if not known:
+        cache.flag_sender(sender, subject, body)
+        if cache.get_setting("lockdown", "0") == "1":
+            return {"ok": True, "skipped": "unknown_sender_lockdown"}
 
     mode = core.detect_mode(sender, subject)
     question = f"{subject}\n\n{body}".strip()
