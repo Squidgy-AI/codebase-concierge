@@ -146,25 +146,68 @@ def _source_link(s: str) -> str:
     return s if s.startswith(("http://", "https://")) else github_blob_url(s)
 
 
-# ---------- Claude composition ----------
+# ---------- Mode routing ----------
 
-SYSTEM_PROMPT = """You are a senior engineer answering codebase questions via email.
-
-Inputs:
-- Nia's draft answer (markdown, technically deep)
-- Source file paths Nia consulted
-- Recent thread history (for follow-up context)
-
-Output rules — STRICT:
+# Shared formatting rules across all modes — keep email clients sane.
+_FORMAT_RULES = """Output rules — STRICT:
 - HTML fragment only. Allowed tags: <p>, <code>, <pre>, <ul>, <ol>, <li>, <a>, <strong>, <em>, <h3>. NO <html>, <body>, <br>, <div>, <span>, or inline styles.
 - Compact HTML: NO blank lines between tags. NO <br> tags. NO <p>&nbsp;</p>. Email clients add their own paragraph spacing — extra breaks compound into giant gaps.
-- Output the HTML on a single line if you can; if not, no more than one newline between block elements.
-- Lead with the answer in 1–2 sentences. No preamble like "Great question" or "Here's how it works".
-- Tone: clear, friendly, terse. Assume a smart non-engineer reader (PM/founder). For technical follow-ups in-thread, get more code-heavy.
+- Lead with the answer in 1–2 sentences. No preamble.
 - End with exactly one <h3>Sources</h3> followed by the provided <ul>. Do NOT invent or rephrase sources.
-- After Sources, if engineers_html is provided, append it verbatim. Do not modify it.
-- If Nia's draft is empty or off-topic, say so plainly in one sentence. Do not invent.
-"""
+- After Sources, if engineers_html is provided, append it verbatim.
+- If Nia's draft is empty or off-topic, say so plainly. Do not invent."""
+
+SYSTEM_PROMPTS = {
+    "eng": (
+        "You are a senior engineer answering codebase questions via email. "
+        "Tone: clear, friendly, terse. Assume a smart non-engineer reader (PM/founder); "
+        "use code blocks when they clarify, but explain what they show. "
+        "For technical follow-ups in-thread, you can be more code-heavy.\n\n" + _FORMAT_RULES
+    ),
+    "sales": (
+        "You are a sales engineer answering capability questions for a prospect. "
+        "Tone: confident, plain-language, no jargon. Customer-safe phrasing.\n"
+        "- Lead with a direct yes/no/partial-yes answer.\n"
+        "- NO code blocks. NO file paths in prose. The Sources section still cites real files for the rep's reference, but the prose stays code-free.\n"
+        "- If the codebase shows partial support, say exactly which parts work and which don't — never overstate.\n"
+        "- If the answer is no, suggest the closest available capability.\n\n"
+        + _FORMAT_RULES
+    ),
+    "marketing": (
+        "You are writing a content brief from real codebase activity. "
+        "Tone: punchy, plain-language, angle-driven.\n"
+        "- Lead with a 1-line hook a non-technical reader could repost.\n"
+        "- Then a short bullet list of why-it-matters points.\n"
+        "- NO code blocks. Translate technical wins into user-visible benefits.\n"
+        "- End with a suggested headline or tweet.\n\n"
+        + _FORMAT_RULES
+    ),
+    "support": (
+        "You are a support engineer triaging a customer report against the actual code. "
+        "Tone: precise, customer-empathetic, no-blame.\n"
+        "- First sentence: BUG, EXPECTED, or NEEDS-MORE-INFO — one of those three labels in <strong>.\n"
+        "- Then the evidence from the code in 1–3 short bullets.\n"
+        "- If BUG: suggest a workaround. If EXPECTED: explain the design intent in plain language.\n\n"
+        + _FORMAT_RULES
+    ),
+}
+
+
+def detect_mode(sender: str | None, subject: str | None) -> str:
+    """Pick a mode from explicit subject tags first, then default to eng.
+
+    Recognized subject tags (case-insensitive, anywhere in subject):
+      [sales]  [marketing]  [support]  [eng]
+    Sender-domain heuristics deliberately skipped — too easy to misroute.
+    """
+    s = (subject or "").lower()
+    for mode in ("sales", "marketing", "support", "eng"):
+        if f"[{mode}]" in s:
+            return mode
+    return "eng"
+
+
+# ---------- Claude composition ----------
 
 
 def compose_answer_html(
@@ -172,6 +215,7 @@ def compose_answer_html(
     nia_response: dict,
     thread_history: list[dict],
     engineers: list[dict] | None = None,
+    mode: str = "eng",
 ) -> str:
     def _fmt(m: dict) -> str:
         sender = (m.get("from_") or [""])[0] if isinstance(m.get("from_"), list) else m.get("from_", "")
@@ -192,10 +236,11 @@ def compose_answer_html(
         engineers_html = f"<h3>Last touched by</h3><ul>{items}</ul>"
     nia_draft = nia_response.get("content", "")
 
+    system_prompt = SYSTEM_PROMPTS.get(mode, SYSTEM_PROMPTS["eng"])
     msg = claude.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=1500,
-        system=SYSTEM_PROMPT,
+        system=system_prompt,
         messages=[{
             "role": "user",
             "content": (
@@ -229,6 +274,7 @@ async def answer_codebase_question(
     question: str,
     thread_history: list[dict] | None = None,
     sender: str | None = None,
+    mode: str = "eng",
 ) -> dict:
     """Channel-agnostic Q&A over indexed codebases.
 
@@ -252,24 +298,27 @@ async def answer_codebase_question(
         }
     """
     # Don't cache follow-ups — thread context shifts the answer.
+    # Cache by (question, mode) — same question in eng vs sales mode is a different answer.
     cacheable = not (thread_history and len(thread_history) > 0)
+    cache_key = f"[{mode}] {question}"
     if cacheable:
-        hit = cache.lookup(question)
+        hit = cache.lookup(cache_key)
         if hit:
             hit["answer_html"] = _prepend_cache_note(
                 hit["answer_html"], hit["original_sender"], hit["original_date"]
             )
+            hit["mode"] = mode
             return hit
 
     history = thread_history or []
     nia_context = await nia_query(question)
     sources = _normalize_sources(nia_context.get("sources", []))
     engineers = cited_engineers(sources)
-    answer_html = compose_answer_html(question, nia_context, history, engineers)
+    answer_html = compose_answer_html(question, nia_context, history, engineers, mode=mode)
     answer_md = nia_context.get("content", "")
 
     if cacheable:
-        cache.store(question, answer_html, answer_md, sources, engineers, sender)
+        cache.store(cache_key, answer_html, answer_md, sources, engineers, sender)
 
     return {
         "answer_html": answer_html,
@@ -277,4 +326,5 @@ async def answer_codebase_question(
         "sources": sources,
         "engineers": engineers,
         "cache_hit": False,
+        "mode": mode,
     }

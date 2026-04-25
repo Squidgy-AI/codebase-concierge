@@ -53,8 +53,10 @@ print(result["engineers"])         # [{name, email, date, source}, ...]
 | Mode | Trigger | System prompt focus |
 |------|---------|---------------------|
 | `eng` | default | File:line citations, code-level answers |
-| `sales` | sender domain or `[sales]` subject | Capability answers, no code, customer-safe phrasing |
-| `marketing` | `[marketing]` subject | What shipped, feature angles, plain language |
-| `support` | `[support]` subject | Bug-vs-feature triage, links to related tickets |
+| `sales` | `[sales]` in subject | Capability yes/no/partial answers, no code, customer-safe phrasing |
+| `marketing` | `[marketing]` in subject | Hook + bullets + suggested headline; no code |
+| `support` | `[support]` in subject | First word: BUG / EXPECTED / NEEDS-MORE-INFO + evidence + workaround |
+
+Mode is detected by `core.detect_mode(sender, subject)` — subject tags only (sender-domain heuristics intentionally skipped to avoid misroutes). Override per-request via `mode` in the `/skill/ask` body.
 
 ## Built for OpenClaw Hackathon (Eragon × Nozomio × AgentMail).
