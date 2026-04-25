@@ -80,7 +80,7 @@ def _flag_row(f: dict) -> str:
     )
 
 
-def render() -> str:
+def render(nia_sources: list[dict] | None = None) -> str:
     import core
     users = cache.list_users()
     flagged = cache.list_flagged(limit=50, only_unresolved=True)
@@ -90,6 +90,18 @@ def render() -> str:
     prompts = {m: core.get_prompt(m) for m in ("eng", "sales", "marketing", "support")}
     active_repos = core.get_active_repos()
     active_docs = core.get_active_data_sources()
+    cache_ttl_hours = cache.get_setting("cache_ttl_hours", "168") or "168"
+
+    # Map active doc display_names → Nia source_id so we can offer a "view" link.
+    # Caller passes the pre-fetched sources list; admin_page() handler does the await.
+    doc_id_by_name: dict[str, str] = {}
+    for src in (nia_sources or []):
+        if not isinstance(src, dict) or not src.get("id"):
+            continue
+        for key in ("display_name", "identifier"):
+            val = src.get(key)
+            if isinstance(val, str) and val:
+                doc_id_by_name.setdefault(val, src["id"])
 
     user_rows = "\n".join(_user_row(u) for u in users) or (
         '<tr><td colspan="4" style="color:#999;text-align:center;padding:18px">'
@@ -111,14 +123,24 @@ def render() -> str:
         for r in active_repos
     ) or '<tr><td colspan="2" style="color:#999;text-align:center;padding:18px">No repos active.</td></tr>'
 
-    docs_rows = "".join(
-        f'<tr><td><span style="color:#a8479a">{html.escape(d)}</span></td>'
-        f'<td><form method="post" action="/admin/sources/doc/remove" style="margin:0">'
-        f'  <input type="hidden" name="display_name" value="{html.escape(d)}">'
-        f'  <button class="link-btn" type="submit" onclick="return confirm(\'Remove {html.escape(d)} from active list?\')">remove</button>'
-        f'</form></td></tr>'
-        for d in active_docs
-    ) or '<tr><td colspan="2" style="color:#999;text-align:center;padding:18px">No doc sources active.</td></tr>'
+    def _doc_row(d: str) -> str:
+        sid = doc_id_by_name.get(d)
+        view = (
+            f'<a href="/admin/source/{html.escape(sid)}/view" style="margin-right:10px;font-size:12px">view</a>'
+            if sid else
+            '<span style="color:#bbb;font-size:12px;margin-right:10px" title="Nia source ID not resolved">view</span>'
+        )
+        return (
+            f'<tr><td><span style="color:#a8479a">{html.escape(d)}</span></td>'
+            f'<td>{view}'
+            f'<form method="post" action="/admin/sources/doc/remove" style="margin:0;display:inline">'
+            f'  <input type="hidden" name="display_name" value="{html.escape(d)}">'
+            f'  <button class="link-btn" type="submit" onclick="return confirm(\'Remove {html.escape(d)} from active list?\')">remove</button>'
+            f'</form></td></tr>'
+        )
+    docs_rows = "".join(_doc_row(d) for d in active_docs) or (
+        '<tr><td colspan="2" style="color:#999;text-align:center;padding:18px">No doc sources active.</td></tr>'
+    )
 
     prompts_html = "".join(
         f'<form method="post" action="/admin/prompt" style="margin-bottom:16px">'
@@ -205,6 +227,20 @@ def render() -> str:
         <input type="hidden" name="enabled" value="{0 if cc_enabled else 1}">
         <button type="submit">{"Disable" if cc_enabled else "Enable"} auto-CC</button>
         <span class="state">{html.escape(cc_state)}</span>
+      </form>
+    </div>
+
+    <div class="panel">
+      <h2 style="margin-top:0">Cache freshness</h2>
+      <p class="sub" style="margin:-4px 0 12px">Cache hits older than the TTL fall through to a fresh Nia query, so updates to the indexed code/docs do reach users — they just absorb one slow answer per change. Set TTL to 0 to never expire.</p>
+      <form method="post" action="/admin/cache_ttl" class="form-row" style="margin-bottom:10px">
+        <input type="number" name="hours" min="0" value="{html.escape(cache_ttl_hours)}" style="flex:0 0 100px">
+        <span class="state" style="font-size:13px;color:#555;align-self:center">hours before a cached answer expires</span>
+        <button type="submit">Save</button>
+      </form>
+      <form method="post" action="/admin/cache_purge" style="display:flex;gap:8px;align-items:center">
+        <button type="submit" onclick="return confirm('Wipe the entire Q&amp;A cache?')" style="background:#fff;color:#c33;border:1px solid #c33">Purge cache now</button>
+        <span class="state" style="font-size:13px;color:#555">currently {s["questions"]} entries / {s["cache_hits"]} hits</span>
       </form>
     </div>
 
@@ -298,7 +334,13 @@ def _inbox_label() -> str:
 
 @router.get("/admin", response_class=HTMLResponse, dependencies=[Depends(_require_admin)])
 async def admin_page():
-    return render()
+    import core
+    try:
+        sources = await core.nia_list_sources()
+    except Exception as e:
+        print(f"[admin] nia_list_sources failed: {e}")
+        sources = []
+    return render(nia_sources=sources)
 
 
 @router.post("/admin/users/upsert", dependencies=[Depends(_require_admin)])
@@ -336,6 +378,62 @@ async def set_lockdown(enabled: int = Form(...)):
 async def set_auto_cc(enabled: int = Form(...)):
     cache.set_setting("auto_cc_enabled", "1" if int(enabled) else "0")
     return RedirectResponse("/admin", status_code=303)
+
+
+@router.post("/admin/cache_ttl", dependencies=[Depends(_require_admin)])
+async def set_cache_ttl(hours: int = Form(...)):
+    cache.set_setting("cache_ttl_hours", str(max(0, int(hours))))
+    return RedirectResponse("/admin", status_code=303)
+
+
+@router.post("/admin/cache_purge", dependencies=[Depends(_require_admin)])
+async def purge_cache():
+    n = cache.purge_cache(older_than_hours=None)
+    print(f"[admin] purged {n} cache rows")
+    return RedirectResponse("/admin", status_code=303)
+
+
+@router.get("/admin/source/{source_id}/view", response_class=HTMLResponse, dependencies=[Depends(_require_admin)])
+async def view_source(source_id: str):
+    import core
+    try:
+        meta = await core.nia_get_source(source_id)
+    except Exception as e:
+        meta = {"error": str(e)}
+    body = ""
+    try:
+        content = await core.nia_get_source_content(source_id)
+        # Nia returns variable shapes; surface the most useful free-text fields.
+        for key in ("content", "text", "body", "raw"):
+            v = content.get(key) if isinstance(content, dict) else None
+            if isinstance(v, str) and v.strip():
+                body = v
+                break
+        if not body and isinstance(content, dict):
+            # Fall back to JSON dump so the operator at least sees structure.
+            import json as _json
+            body = _json.dumps(content, indent=2)[:200_000]
+    except Exception as e:
+        body = f"(failed to fetch content: {e})"
+
+    title = (meta.get("display_name") or meta.get("identifier") or source_id) if isinstance(meta, dict) else source_id
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>{html.escape(title)}</title>
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+          background: #fafafa; padding: 24px; max-width: 880px; margin: 0 auto; }}
+  h1 {{ font-size: 18px; margin: 0 0 4px; }}
+  .meta {{ font-size: 12px; color: #888; margin-bottom: 16px; }}
+  .nav a {{ color: #0a3a99; font-size: 13px; }}
+  pre {{ background: #fff; border: 1px solid #eee; border-radius: 8px;
+         padding: 16px; white-space: pre-wrap; word-wrap: break-word;
+         font-family: ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.5; }}
+</style></head><body>
+  <div class="nav"><a href="/admin">← admin</a></div>
+  <h1>{html.escape(title)}</h1>
+  <div class="meta">id: <code>{html.escape(source_id)}</code> · type: {html.escape(str(meta.get('type','?')) if isinstance(meta, dict) else '?')} · status: {html.escape(str(meta.get('status','?')) if isinstance(meta, dict) else '?')}</div>
+  <pre>{html.escape(body or '(empty)')}</pre>
+</body></html>"""
 
 
 def _set_active_repos(repos: list[str]) -> None:

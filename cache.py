@@ -106,9 +106,33 @@ def _signature(question: str) -> str:
     return " ".join(sorted(keep))
 
 
+def _ttl_seconds() -> int:
+    """Cache TTL in seconds. 0 means no expiry. Read fresh each lookup so admin
+    edits take effect without a restart."""
+    raw = (get_setting("cache_ttl_hours", "168") or "168").strip()
+    try:
+        return max(0, int(float(raw)) * 3600)
+    except ValueError:
+        return 168 * 3600
+
+
+def _is_fresh(created_at: str | None) -> bool:
+    ttl = _ttl_seconds()
+    if ttl <= 0 or not created_at:
+        return True
+    try:
+        if "T" in created_at:
+            t = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        else:
+            t = datetime.fromisoformat(created_at).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return True  # don't punish a malformed row by always missing
+    return (datetime.now(timezone.utc) - t).total_seconds() < ttl
+
+
 def lookup(question: str, threshold: float = 0.85, hit_sender: str | None = None) -> dict | None:
-    """Return the cached payload if a sufficiently similar question exists.
-    Records the hit (count + last_hit_at + last_hit_sender) for the dashboard.
+    """Return the cached payload if a sufficiently similar question exists AND
+    the entry is younger than the configured TTL.
 
     Result: {
         "answer_html", "answer_md", "sources", "engineers",
@@ -138,12 +162,29 @@ def lookup(question: str, threshold: float = 0.85, hit_sender: str | None = None
                 row = best
         if not row:
             return None
+        # Drop stale rows so the brain re-queries Nia (which may have re-indexed).
+        if not _is_fresh(row["created_at"]):
+            return None
         # Record the hit so the dashboard can show "asked X times".
         conn.execute(
             "UPDATE qa_cache SET hit_count = hit_count + 1, last_hit_at = ?, last_hit_sender = ? WHERE id = ?",
             (datetime.now(timezone.utc).isoformat(timespec="seconds"), hit_sender, row["id"]),
         )
         return _row_to_payload(row)
+
+
+def purge_cache(older_than_hours: int | None = None) -> int:
+    """Delete rows. older_than_hours=None wipes everything. Returns rows deleted."""
+    _init_db()
+    with _lock, _connect() as conn:
+        if older_than_hours is None:
+            cur = conn.execute("DELETE FROM qa_cache")
+        else:
+            cur = conn.execute(
+                "DELETE FROM qa_cache WHERE created_at < datetime('now', ?)",
+                (f"-{int(older_than_hours)} hours",),
+            )
+        return cur.rowcount
 
 
 def store(

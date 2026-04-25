@@ -76,6 +76,27 @@ async def nia_query(question: str) -> dict:
         return r.json()
 
 
+async def nia_get_source(source_id: str) -> dict:
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.get(
+            f"{NIA_BASE}/v2/sources/{source_id}",
+            headers={"Authorization": f"Bearer {NIA_API_KEY}"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+
+async def nia_get_source_content(source_id: str) -> dict:
+    """Pull the raw indexed content (text body + metadata) for a source."""
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(
+            f"{NIA_BASE}/v2/sources/{source_id}/content",
+            headers={"Authorization": f"Bearer {NIA_API_KEY}"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+
 async def nia_list_sources() -> list[dict]:
     """List every source we have indexed in Nia (repos + docs)."""
     async with httpx.AsyncClient(timeout=15) as client:
