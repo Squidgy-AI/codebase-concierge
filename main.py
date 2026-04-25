@@ -65,6 +65,30 @@ async def nia_query(question: str) -> dict:
         return r.json()
 
 
+def _normalize_source(source) -> str | None:
+    """Nia sources come back as either strings ('honojs/hono/src/hono.ts') or dicts
+    (when documentation sources are mixed in). Reduce to a single label string."""
+    if isinstance(source, str):
+        return source.strip() or None
+    if isinstance(source, dict):
+        # Try the most informative keys first.
+        for key in ("path", "file", "source", "identifier", "url", "name", "title"):
+            v = source.get(key)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+    return None
+
+
+def _normalize_sources(sources: list) -> list[str]:
+    out, seen = [], set()
+    for s in sources or []:
+        n = _normalize_source(s)
+        if n and n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out
+
+
 def _source_to_local(source: str) -> tuple[str, str] | None:
     """Map 'honojs/hono/src/hono.ts' → (repo_dir, relative_path) if a local clone exists."""
     parts = source.split("/", 2)
@@ -179,15 +203,12 @@ def compose_answer(question: str, nia_response: dict, thread_history: list[dict]
         text = (m.get("text") or m.get("preview") or "")[:500]
         return f"From: {sender}\n{text}"
     history_text = "\n\n".join(_fmt(m) for m in thread_history[-4:])
-    sources = nia_response.get("sources", [])
-    seen, unique_sources = set(), []
-    for s in sources:
-        if s not in seen:
-            seen.add(s)
-            unique_sources.append(s)
-    sources_html = "\n".join(
-        f'<li><a href="{github_blob_url(s)}">{s}</a></li>' for s in unique_sources[:8]
-    )
+    unique_sources = _normalize_sources(nia_response.get("sources", []))
+    def _link(s: str) -> str:
+        # External URLs (docs sources) point straight to themselves; repo paths get a GitHub blob URL.
+        href = s if s.startswith(("http://", "https://")) else github_blob_url(s)
+        return f'<li><a href="{href}">{s}</a></li>'
+    sources_html = "\n".join(_link(s) for s in unique_sources[:8])
     engineers_html = ""
     if engineers:
         items = "".join(
@@ -250,7 +271,7 @@ async def agentmail_webhook(request: Request):
 
     history = await get_thread_messages(thread_id) if thread_id else []
     nia_context = await nia_query(question)
-    engineers = cited_engineers(nia_context.get("sources", []))
+    engineers = cited_engineers(_normalize_sources(nia_context.get("sources", [])))
     answer_html = compose_answer(question, nia_context, history, engineers)
 
     # Demo-safe CC: only loop in engineers whose email matches an allow-listed domain,
