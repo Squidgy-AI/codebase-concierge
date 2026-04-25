@@ -103,19 +103,29 @@ def _row(entry: dict) -> str:
     )
 
 
-def render() -> str:
+def render_feed_html() -> str:
+    """Just the feed + stats fragment, for JS-driven refresh without reloading the page."""
     rows = cache.recent(limit=30)
     s = cache.stats()
-    rendered = "\n".join(_row(r) for r in rows) or (
+    body = "\n".join(_row(r) for r in rows) or (
         '<div style="padding:48px;text-align:center;color:#999">'
-        'No questions yet. Email '
-        '<code>codebaseconcierge@agentmail.to</code> or POST to /skill/ask.</div>'
+        'No questions yet. Send one below or email '
+        '<code>codebaseconcierge@agentmail.to</code>.</div>'
     )
+    return (
+        f'<div class="stats">'
+        f'  <div class="stat"><div class="stat-num">{s["questions"]}</div><div class="stat-label">Questions answered</div></div>'
+        f'  <div class="stat"><div class="stat-num">{s["cache_hits"]}</div><div class="stat-label">Cache hits</div></div>'
+        f'</div>'
+        f'<div class="feed">{body}</div>'
+    )
+
+
+def render() -> str:
     return f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta http-equiv="refresh" content="5">
   <title>Codebase Concierge — live log</title>
   <style>
     body {{ font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
@@ -123,7 +133,7 @@ def render() -> str:
     .wrap {{ max-width: 820px; margin: 0 auto; }}
     h1 {{ font-size: 22px; margin: 0 0 4px 0; }}
     .sub {{ color: #888; font-size: 13px; margin-bottom: 18px; }}
-    .stats {{ display: flex; gap: 24px; margin: 0 0 20px 0;
+    .stats {{ display: flex; gap: 24px; margin: 0 0 14px 0;
               padding: 14px 18px; background: #fff; border-radius: 8px;
               box-shadow: 0 1px 2px rgba(0,0,0,0.04); }}
     .stat {{ flex: 0 0 auto; }}
@@ -134,19 +144,122 @@ def render() -> str:
     a {{ color: #0a3a99; text-decoration: none; }}
     a:hover {{ text-decoration: underline; }}
     code {{ background: #f0f0f0; padding: 1px 5px; border-radius: 3px; font-size: 12px; }}
+
+    .chat {{ background: #fff; border-radius: 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+             padding: 16px 18px; margin-bottom: 18px; }}
+    .chat-row {{ display: flex; gap: 8px; margin-bottom: 10px; }}
+    .chat input, .chat select, .chat textarea, .chat button {{
+      font-family: inherit; font-size: 14px; padding: 8px 10px;
+      border: 1px solid #ddd; border-radius: 6px; background: #fff;
+    }}
+    .chat textarea {{ flex: 1; resize: vertical; min-height: 38px; }}
+    .chat select {{ flex: 0 0 110px; }}
+    .chat input.sender {{ flex: 0 0 220px; }}
+    .chat button {{ background: #0a3a99; color: white; border: none;
+                    cursor: pointer; padding: 8px 16px; font-weight: 500; }}
+    .chat button:hover {{ background: #0c46b8; }}
+    .chat button:disabled {{ background: #aaa; cursor: not-allowed; }}
+    .chat-out {{ margin-top: 12px; }}
+    .chat-bubble {{ padding: 10px 14px; border-radius: 8px;
+                    background: #f4f6fa; border-left: 3px solid #0a3a99;
+                    margin-bottom: 8px; font-size: 14px; line-height: 1.45; }}
+    .chat-bubble.cache {{ border-left-color: #f5b800; background: #fff8d6; }}
+    .chat-meta {{ font-size: 11px; color: #888; margin-top: 6px; }}
+    .chat-bubble h3 {{ font-size: 13px; margin: 10px 0 4px; color: #555; }}
+    .chat-bubble ul {{ margin: 4px 0 4px 18px; padding: 0; }}
+    .chat-bubble pre {{ background: #fff; padding: 8px; border-radius: 4px;
+                        border: 1px solid #eee; overflow-x: auto; font-size: 12px; }}
+    .chat-bubble code {{ background: #fff; }}
   </style>
 </head>
 <body>
   <div class="wrap">
     <h1>Codebase Concierge — live log</h1>
-    <div class="sub">Q&A memory across email + /skill/ask channels. Auto-refreshes every 5s.</div>
-    <div class="stats">
-      <div class="stat"><div class="stat-num">{s['questions']}</div><div class="stat-label">Questions answered</div></div>
-      <div class="stat"><div class="stat-num">{s['cache_hits']}</div><div class="stat-label">Cache hits</div></div>
+    <div class="sub">One brain, two channels. Ask via email <code>codebaseconcierge@agentmail.to</code> or right here.</div>
+
+    <div class="chat">
+      <div class="chat-row">
+        <select id="mode">
+          <option value="eng">eng</option>
+          <option value="sales">sales</option>
+          <option value="marketing">marketing</option>
+          <option value="support">support</option>
+        </select>
+        <input class="sender" id="sender" type="text" placeholder="from (e.g. you@team.com)">
+      </div>
+      <div class="chat-row">
+        <textarea id="question" rows="1" placeholder="Ask anything about the indexed codebase…"></textarea>
+        <button id="send">Send</button>
+      </div>
+      <div class="chat-out" id="chat-out"></div>
     </div>
-    <div class="feed">
-      {rendered}
-    </div>
+
+    <div id="feed-mount"></div>
   </div>
+
+  <script>
+    const mount = document.getElementById('feed-mount');
+    const out = document.getElementById('chat-out');
+    const send = document.getElementById('send');
+    const q = document.getElementById('question');
+    const m = document.getElementById('mode');
+    const s = document.getElementById('sender');
+
+    async function refreshFeed() {{
+      try {{
+        const r = await fetch('/api/feed');
+        if (r.ok) mount.innerHTML = await r.text();
+      }} catch (e) {{ /* swallow */ }}
+    }}
+
+    async function ask() {{
+      const text = q.value.trim();
+      if (!text) return;
+      send.disabled = true;
+      const t0 = performance.now();
+      const echo = document.createElement('div');
+      echo.className = 'chat-bubble';
+      echo.style.background = '#fff';
+      echo.style.borderLeftColor = '#999';
+      echo.innerHTML = '<strong>You:</strong> ' + text.replace(/[<>&]/g, c => ({{'<':'&lt;','>':'&gt;','&':'&amp;'}}[c])) +
+                       '<div class="chat-meta">mode: ' + m.value + (s.value ? ' · from: ' + s.value : '') + '</div>';
+      out.prepend(echo);
+
+      const loading = document.createElement('div');
+      loading.className = 'chat-bubble';
+      loading.textContent = 'Thinking…';
+      out.prepend(loading);
+
+      try {{
+        const r = await fetch('/skill/ask', {{
+          method: 'POST',
+          headers: {{ 'Content-Type': 'application/json' }},
+          body: JSON.stringify({{ question: text, mode: m.value, sender: s.value || null }}),
+        }});
+        const data = await r.json();
+        const dur = ((performance.now() - t0) / 1000).toFixed(1);
+        loading.className = 'chat-bubble' + (data.cache_hit ? ' cache' : '');
+        loading.innerHTML = data.answer_html +
+          '<div class="chat-meta">' +
+          (data.cache_hit ? '⚡ cache hit · ' : '') +
+          dur + 's · mode: ' + (data.mode || m.value) +
+          '</div>';
+        q.value = '';
+        refreshFeed();
+      }} catch (e) {{
+        loading.textContent = 'Error: ' + e.message;
+      }} finally {{
+        send.disabled = false;
+      }}
+    }}
+
+    send.addEventListener('click', ask);
+    q.addEventListener('keydown', e => {{
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) ask();
+    }});
+
+    refreshFeed();
+    setInterval(refreshFeed, 5000);
+  </script>
 </body>
 </html>"""

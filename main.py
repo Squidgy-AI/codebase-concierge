@@ -131,6 +131,12 @@ async def index():
     return dashboard.render()
 
 
+@app.get("/api/feed", response_class=HTMLResponse)
+async def feed_fragment():
+    """Stats + feed HTML fragment, polled by the dashboard for live updates."""
+    return dashboard.render_feed_html()
+
+
 @app.get("/healthz")
 async def healthz():
     return {"ok": True}
