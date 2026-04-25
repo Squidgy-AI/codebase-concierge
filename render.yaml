@@ -30,3 +30,5 @@ services:
         sync: false
       - key: CACHE_DB_PATH
         value: /disk/cache.db
+      - key: ADMIN_PASSWORD
+        sync: false

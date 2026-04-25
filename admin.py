@@ -1,15 +1,34 @@
 """
 Admin panel — user CRUD, flagged-sender review, lockdown toggle.
 
-Single-tenant, no auth (hackathon scope). Stick behind a reverse proxy or
-add an X-Admin-Token check before exposing publicly.
+Auth: HTTP Basic against ADMIN_PASSWORD env var. If unset (local dev),
+auth is bypassed. /api/users stays open so the dashboard autocomplete
+works without prompting visitors.
 """
 import html
+import os
+import secrets
 
-from fastapi import APIRouter, Form, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 import cache
+
+
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "").strip()
+_security = HTTPBasic(auto_error=False)
+
+
+def _require_admin(creds: HTTPBasicCredentials | None = Depends(_security)) -> None:
+    if not ADMIN_PASSWORD:
+        return  # no password set → bypass (dev convenience)
+    if creds is None or not secrets.compare_digest(creds.password or "", ADMIN_PASSWORD):
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized",
+            headers={"WWW-Authenticate": 'Basic realm="Concierge Admin"'},
+        )
 
 
 router = APIRouter()
@@ -139,6 +158,14 @@ def render() -> str:
     </div>
 
     <div class="panel">
+      <h2 style="margin-top:0">Pre-warm cache</h2>
+      <form method="post" action="/admin/prewarm" class="toggle">
+        <button type="submit">▶ Run all demo scenarios</button>
+        <span class="state">Runs the 7 questions on /demo through the brain, populating the cache. Misses fire Nia (~25s each); hits are instant. Runs in background — refresh /admin or / to see entries appear.</span>
+      </form>
+    </div>
+
+    <div class="panel">
       <h2 style="margin-top:0">Users ({len(users)})</h2>
       <table>
         <thead><tr><th>Email</th><th>Name</th><th>Mode</th><th></th></tr></thead>
@@ -178,12 +205,12 @@ def _inbox_label() -> str:
 
 # ---------- Routes ----------
 
-@router.get("/admin", response_class=HTMLResponse)
+@router.get("/admin", response_class=HTMLResponse, dependencies=[Depends(_require_admin)])
 async def admin_page():
     return render()
 
 
-@router.post("/admin/users/upsert")
+@router.post("/admin/users/upsert", dependencies=[Depends(_require_admin)])
 async def upsert_user(
     email: str = Form(...),
     display_name: str = Form(""),
@@ -196,22 +223,41 @@ async def upsert_user(
     return RedirectResponse("/admin", status_code=303)
 
 
-@router.post("/admin/users/delete")
+@router.post("/admin/users/delete", dependencies=[Depends(_require_admin)])
 async def delete_user(email: str = Form(...)):
     cache.delete_user(email)
     return RedirectResponse("/admin", status_code=303)
 
 
-@router.post("/admin/flagged/resolve")
+@router.post("/admin/flagged/resolve", dependencies=[Depends(_require_admin)])
 async def resolve_flagged(flag_id: int = Form(...)):
     cache.resolve_flagged(flag_id)
     return RedirectResponse("/admin", status_code=303)
 
 
-@router.post("/admin/lockdown")
+@router.post("/admin/lockdown", dependencies=[Depends(_require_admin)])
 async def set_lockdown(enabled: int = Form(...)):
     cache.set_setting("lockdown", "1" if int(enabled) else "0")
     return RedirectResponse("/admin", status_code=303)
+
+
+@router.post("/admin/prewarm", dependencies=[Depends(_require_admin)])
+async def prewarm_cache(background_tasks: BackgroundTasks):
+    """Run all canned demo scenarios in the background. Cache hits are instant;
+    misses fire Nia (~25s each). Returns to /admin immediately."""
+    import demo
+    background_tasks.add_task(_run_prewarm, demo._SCENARIOS)
+    return RedirectResponse("/admin", status_code=303)
+
+
+async def _run_prewarm(scenarios) -> None:
+    import core
+    for sid, _title, _why, question, mode, sender in scenarios:
+        try:
+            await core.answer_codebase_question(question, sender=sender, mode=mode)
+            print(f"[prewarm] {sid} done")
+        except Exception as e:
+            print(f"[prewarm] {sid} failed: {e}")
 
 
 @router.get("/api/users")

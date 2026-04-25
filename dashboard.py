@@ -4,6 +4,7 @@ Concierge dashboard — read-only HTML view of the SQLite Q&A log.
 One-file, zero JS frameworks. Auto-refreshes every 5s via meta tag.
 """
 import html
+import os
 import re
 from datetime import datetime, timezone
 
@@ -89,22 +90,95 @@ def _row(entry: dict) -> str:
         )
 
     sender = html.escape(entry["original_sender"] or "unknown")
+    # Searchable text for the client-side filter (lowercased question + sender + mode)
+    search_blob = html.escape(f"{question} {sender} {mode}".lower())
+    answer_html = entry.get("answer_html") or ""
     return (
-        f'<article style="padding:14px 18px;border-bottom:1px solid #eee">'
-        f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">'
-        f'  {_badge(mode)}'
-        f'  <span style="color:#999;font-size:12px">{sender} · {asked_ago}</span>'
+        f'<article class="row" data-search="{search_blob}" data-mode="{mode}">'
+        f'<div class="row-head" onclick="toggleRow(this)">'
+        f'  <div class="row-meta">'
+        f'    {_badge(mode)}'
+        f'    <span style="color:#999;font-size:12px">{sender} · {asked_ago}</span>'
+        f'    <span class="row-toggle">▾</span>'
+        f'  </div>'
+        f'  <div class="row-q">{html.escape(question)}</div>'
+        f'  <div class="row-sources">{sources_html}</div>'
+        f'  {engineers_html}'
+        f'  {hits_html}'
         f'</div>'
-        f'<div style="font-size:15px;font-weight:500;margin-bottom:4px">{html.escape(question)}</div>'
-        f'<div style="font-size:12px;color:#555">{sources_html}</div>'
-        f'{engineers_html}'
-        f'{hits_html}'
+        f'<div class="row-detail">'
+        f'  <div class="row-detail-inner">{answer_html}</div>'
+        f'</div>'
         f'</article>'
     )
 
 
+def _feature_card(icon: str, label: str, value: str, sub: str = "") -> str:
+    return (
+        f'<div class="feat">'
+        f'  <div class="feat-icon">{icon}</div>'
+        f'  <div class="feat-body">'
+        f'    <div class="feat-label">{html.escape(label)}</div>'
+        f'    <div class="feat-value">{value}</div>'
+        f'    {f"<div class=\"feat-sub\">{html.escape(sub)}</div>" if sub else ""}'
+        f'  </div>'
+        f'</div>'
+    )
+
+
+def render_features_html() -> str:
+    """Live system capability panel. Pulls real config so it's never stale."""
+    inbox = os.environ.get("AGENTMAIL_INBOX_ID", "—")
+    repos = [r.strip() for r in os.environ.get("NIA_REPOS", "").split(",") if r.strip()]
+    docs = [d.strip() for d in os.environ.get("NIA_DATA_SOURCES", "").split(",") if d.strip()]
+    cc_domains = [d.strip() for d in os.environ.get("AUTO_CC_DOMAINS", "").split(",") if d.strip()]
+    users = cache.list_users()
+    lockdown = cache.get_setting("lockdown", "0") == "1"
+
+    # Voice / mode list
+    modes_html = " ".join(_badge(m) for m in ("eng", "sales", "marketing", "support"))
+
+    # Indexed sources
+    src_parts = []
+    for r in repos:
+        src_parts.append(f'<a href="https://github.com/{html.escape(r)}" target="_blank">{html.escape(r)}</a>')
+    for d in docs:
+        src_parts.append(f'<span style="color:#a8479a">{html.escape(d)}</span>')
+    sources_html = " · ".join(src_parts) or '<span style="color:#999">none configured</span>'
+
+    inbox_html = (
+        f'<a href="mailto:{html.escape(inbox)}">{html.escape(inbox)}</a>'
+        if "@" in inbox else html.escape(inbox)
+    )
+
+    cc_html = (
+        f'<span style="color:#0a7d3e">on</span> <span style="color:#888;font-size:11px">'
+        f'({", ".join(html.escape(d) for d in cc_domains)})</span>'
+        if cc_domains else '<span style="color:#999">off</span>'
+    )
+
+    lock_html = (
+        '<span style="color:#c33">ON</span> <span style="color:#888;font-size:11px">(unknown senders ignored)</span>'
+        if lockdown else
+        '<span style="color:#0a7d3e">off</span> <span style="color:#888;font-size:11px">(answers everyone, flags unknown)</span>'
+    )
+
+    return (
+        '<div class="features">'
+        + _feature_card("🧠", "Brain (Nia)", sources_html, f"{len(repos)} repo{'s' if len(repos)!=1 else ''}, {len(docs)} doc source{'s' if len(docs)!=1 else ''} indexed")
+        + _feature_card("📨", "Voice (AgentMail)", inbox_html, "threaded replies, /webhook")
+        + _feature_card("🔌", "Skill API", '<code>POST /skill/ask</code>', "OpenClaw, Roam, CLI — same brain")
+        + _feature_card("🎭", "Modes", modes_html, "subject tag · sender map · default eng")
+        + _feature_card("👥", "Known senders", str(len(users)), f'<a href="/admin">manage in /admin</a>')
+        + _feature_card("⚡", "Memory cache", "SQLite", "duplicate Q&A returns in <1s")
+        + _feature_card("🔍", "Auto-CC engineer", cc_html, "via git blame on cited code")
+        + _feature_card("🛡️", "Lockdown", lock_html, "")
+        + '</div>'
+    )
+
+
 def render_feed_html() -> str:
-    """Just the feed + stats fragment, for JS-driven refresh without reloading the page."""
+    """Features + stats + feed fragment, polled for live updates without page reload."""
     rows = cache.recent(limit=30)
     s = cache.stats()
     body = "\n".join(_row(r) for r in rows) or (
@@ -113,15 +187,18 @@ def render_feed_html() -> str:
         '<code>codebaseconcierge@agentmail.to</code>.</div>'
     )
     return (
-        f'<div class="stats">'
-        f'  <div class="stat"><div class="stat-num">{s["questions"]}</div><div class="stat-label">Questions answered</div></div>'
-        f'  <div class="stat"><div class="stat-num">{s["cache_hits"]}</div><div class="stat-label">Cache hits</div></div>'
-        f'</div>'
-        f'<div class="feed">{body}</div>'
+        render_features_html()
+        + f'<div class="stats">'
+        + f'  <div class="stat"><div class="stat-num">{s["questions"]}</div><div class="stat-label">Questions answered</div></div>'
+        + f'  <div class="stat"><div class="stat-num">{s["cache_hits"]}</div><div class="stat-label">Cache hits</div></div>'
+        + f'  <div class="stat"><div class="stat-num">{s["flagged_senders"]}</div><div class="stat-label">Flagged senders</div></div>'
+        + f'</div>'
+        + f'<div class="feed">{body}</div>'
     )
 
 
 def render() -> str:
+    initial_feed = render_feed_html()
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -170,6 +247,45 @@ def render() -> str:
     .chat-bubble pre {{ background: #fff; padding: 8px; border-radius: 4px;
                         border: 1px solid #eee; overflow-x: auto; font-size: 12px; }}
     .chat-bubble code {{ background: #fff; }}
+
+    .features {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+                  gap: 10px; margin: 0 0 16px 0; }}
+    .feat {{ display: flex; gap: 10px; background: #fff; padding: 12px 14px;
+             border-radius: 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }}
+    .feat-icon {{ font-size: 20px; line-height: 1; flex: 0 0 auto; }}
+    .feat-label {{ font-size: 10px; color: #888; text-transform: uppercase;
+                   letter-spacing: 0.5px; margin-bottom: 2px; }}
+    .feat-value {{ font-size: 13px; font-weight: 500; line-height: 1.3; word-break: break-word; }}
+    .feat-sub {{ font-size: 11px; color: #888; margin-top: 4px; }}
+    .feat-value a {{ color: #0a3a99; }}
+
+    .filterbar {{ display: flex; gap: 8px; align-items: center; margin: 0 0 10px 0;
+                   padding: 10px 12px; background: #fff; border-radius: 8px;
+                   box-shadow: 0 1px 2px rgba(0,0,0,0.04); flex-wrap: wrap; }}
+    .filterbar input {{ flex: 1; min-width: 180px; font-family: inherit; font-size: 13px;
+                        padding: 6px 10px; border: 1px solid #ddd; border-radius: 6px; }}
+    .filterbar .pill {{ padding: 4px 10px; border-radius: 12px; font-size: 11px; cursor: pointer;
+                        border: 1px solid #ddd; background: #fff; user-select: none; font-weight: 500; }}
+    .filterbar .pill.active {{ background: #0a3a99; color: white; border-color: #0a3a99; }}
+
+    .row {{ border-bottom: 1px solid #eee; }}
+    .row.hidden {{ display: none; }}
+    .row-head {{ padding: 14px 18px; cursor: pointer; }}
+    .row-head:hover {{ background: #fafafa; }}
+    .row-meta {{ display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }}
+    .row-toggle {{ margin-left: auto; color: #999; font-size: 12px; transition: transform .15s; }}
+    .row.open .row-toggle {{ transform: rotate(180deg); }}
+    .row-q {{ font-size: 15px; font-weight: 500; margin-bottom: 4px; }}
+    .row-sources {{ font-size: 12px; color: #555; }}
+    .row-detail {{ display: none; padding: 4px 18px 16px 18px; background: #fafafa; border-top: 1px solid #eee; }}
+    .row.open .row-detail {{ display: block; }}
+    .row-detail-inner {{ background: #fff; padding: 14px 16px; border-radius: 6px;
+                          font-size: 14px; line-height: 1.5; color: #222; }}
+    .row-detail-inner h3 {{ font-size: 13px; margin: 12px 0 4px; color: #555; }}
+    .row-detail-inner ul {{ margin: 4px 0 4px 18px; padding: 0; }}
+    .row-detail-inner pre {{ background: #f4f6fa; padding: 10px; border-radius: 4px;
+                              border: 1px solid #eee; overflow-x: auto; font-size: 12px; }}
+    .row-detail-inner code {{ background: #f0f0f0; }}
   </style>
 </head>
 <body>
@@ -195,7 +311,16 @@ def render() -> str:
       <div class="chat-out" id="chat-out"></div>
     </div>
 
-    <div id="feed-mount"></div>
+    <div class="filterbar">
+      <input id="search" type="text" placeholder="Search questions, senders, sources…" autocomplete="off">
+      <span class="pill mode-pill active" data-mode="all">all</span>
+      <span class="pill mode-pill" data-mode="eng">eng</span>
+      <span class="pill mode-pill" data-mode="sales">sales</span>
+      <span class="pill mode-pill" data-mode="marketing">marketing</span>
+      <span class="pill mode-pill" data-mode="support">support</span>
+    </div>
+
+    <div id="feed-mount">{initial_feed}</div>
   </div>
 
   <script>
@@ -206,10 +331,33 @@ def render() -> str:
     const m = document.getElementById('mode');
     const s = document.getElementById('sender');
 
+    function toggleRow(head) {{ head.parentElement.classList.toggle('open'); }}
+
+    function applyFilter() {{
+      const term = (document.getElementById('search').value || '').trim().toLowerCase();
+      const activeMode = document.querySelector('.mode-pill.active')?.dataset.mode || 'all';
+      document.querySelectorAll('.row').forEach(r => {{
+        const matchesText = !term || (r.dataset.search || '').includes(term);
+        const matchesMode = activeMode === 'all' || r.dataset.mode === activeMode;
+        r.classList.toggle('hidden', !(matchesText && matchesMode));
+      }});
+    }}
+    document.addEventListener('input', e => {{ if (e.target.id === 'search') applyFilter(); }});
+    document.addEventListener('click', e => {{
+      if (e.target.classList && e.target.classList.contains('mode-pill')) {{
+        document.querySelectorAll('.mode-pill').forEach(p => p.classList.remove('active'));
+        e.target.classList.add('active');
+        applyFilter();
+      }}
+    }});
+
     async function refreshFeed() {{
       try {{
         const r = await fetch('/api/feed');
-        if (r.ok) mount.innerHTML = await r.text();
+        if (r.ok) {{
+          mount.innerHTML = await r.text();
+          applyFilter();
+        }}
       }} catch (e) {{ /* swallow */ }}
     }}
 
