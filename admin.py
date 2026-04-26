@@ -9,8 +9,9 @@ import html
 import os
 import secrets
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import Body
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 import cache
@@ -40,17 +41,11 @@ def _require_admin(creds: HTTPBasicCredentials | None = Depends(_security)) -> N
 
 router = APIRouter()
 
-_MODE_COLORS = {
-    "eng": ("#0a7d3e", "#dcf5e6"),
-    "sales": ("#0a3a99", "#e0eafc"),
-    "marketing": ("#a8479a", "#fbe6f5"),
-    "support": ("#b3530a", "#fcecdc"),
-    "security": ("#990a0a", "#fbe0e0"),
-}
-
-
 def _badge(mode: str) -> str:
-    fg, bg = _MODE_COLORS.get(mode, _MODE_COLORS["eng"])
+    """Pull color from core.all_modes() so custom modes render with their own palette."""
+    import core
+    info = core.all_modes().get(mode)
+    fg, bg = info["color"] if info else ("#444", "#eee")
     return (
         f'<span style="display:inline-block;padding:2px 8px;border-radius:4px;'
         f'font-size:11px;font-weight:600;letter-spacing:0.5px;'
@@ -72,6 +67,27 @@ def _user_row(u: dict) -> str:
     )
 
 
+def _gap_row(g: dict) -> str:
+    askers = ", ".join(html.escape(a) for a in g["askers"][:5])
+    if len(g["askers"]) > 5:
+        askers += f' <span style="color:#bbb">+{len(g["askers"])-5} more</span>'
+    other_q = ""
+    if len(g["all_questions"]) > 1:
+        other_q = (
+            '<div class="all-q">also asked: '
+            + " · ".join(html.escape(q) for q in g["all_questions"][1:4])
+            + '</div>'
+        )
+    return (
+        f'<tr>'
+        f'<td><span class="ask-count">{g["ask_count"]}</span><div class="askers">{g["asker_count"]} {"asker" if g["asker_count"]==1 else "askers"}</div></td>'
+        f'<td><strong>{html.escape(g["exemplar_question"])}</strong>{other_q}'
+        f'  <div class="askers" style="margin-top:6px">{askers}</div></td>'
+        f'<td><div class="snippet">{html.escape(g["snippet"])}</div></td>'
+        f'</tr>'
+    )
+
+
 def _flag_row(f: dict) -> str:
     sender = html.escape(f["sender"] or "")
     subject = html.escape(f.get("subject") or "")
@@ -88,14 +104,17 @@ def _flag_row(f: dict) -> str:
     )
 
 
-def render(nia_sources: list[dict] | None = None) -> str:
+def render(nia_sources: list[dict] | None = None, nonce: str = "") -> str:
+    nonce_attr = f' nonce="{html.escape(nonce)}"' if nonce else ""
     import core
     users = cache.list_users()
     flagged = cache.list_flagged(limit=50, only_unresolved=True)
     lockdown = cache.get_setting("lockdown", "0") == "1"
     cc_enabled = cache.get_setting("auto_cc_enabled", "0") == "1"
     s = cache.stats()
-    prompts = {m: core.get_prompt(m) for m in ("eng", "sales", "marketing", "support", "security")}
+    modes = core.all_modes()
+    prompts = {mid: core.get_prompt(mid) for mid in modes.keys()}
+    custom_modes = [m for mid, m in modes.items() if not m["builtin"]]
     active_repos = core.get_active_repos()
     active_docs = core.get_active_data_sources()
     cache_ttl_hours = cache.get_setting("cache_ttl_hours", "168") or "168"
@@ -150,22 +169,49 @@ def render(nia_sources: list[dict] | None = None) -> str:
         '<tr><td colspan="2" style="color:#999;text-align:center;padding:18px">No doc sources active.</td></tr>'
     )
 
-    prompts_html = "".join(
-        f'<form method="post" action="/admin/prompt" style="margin-bottom:16px">'
-        f'  <input type="hidden" name="mode" value="{m}">'
-        f'  <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">{_badge(m)}'
-        f'    <span style="color:#888;font-size:12px">system prompt</span></div>'
-        f'  <textarea name="prompt" rows="6" style="width:100%;font-family:ui-monospace,Menlo,monospace;'
-        f'    font-size:12px;padding:10px;border:1px solid #ddd;border-radius:6px;line-height:1.45">'
-        f'{html.escape(prompts[m])}</textarea>'
-        f'  <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:6px">'
-        f'    <button type="submit">Save</button>'
-        f'    <button type="submit" name="reset" value="1" formnovalidate '
-        f'      onclick="return confirm(\'Reset {m} prompt to default?\')" '
-        f'      style="background:#fff;color:#c33;border:1px solid #c33">Reset to default</button>'
-        f'  </div>'
-        f'</form>'
-        for m in ("eng", "sales", "marketing", "support", "security")
+    def _builtin_prompt_form(mid: str) -> str:
+        return (
+            f'<form method="post" action="/admin/prompt" style="margin-bottom:16px">'
+            f'  <input type="hidden" name="mode" value="{mid}">'
+            f'  <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">{_badge(mid)}'
+            f'    <span style="color:#888;font-size:12px">system prompt · built-in</span></div>'
+            f'  <textarea name="prompt" rows="6" style="width:100%;font-family:ui-monospace,Menlo,monospace;'
+            f'    font-size:12px;padding:10px;border:1px solid #ddd;border-radius:6px;line-height:1.45">'
+            f'{html.escape(prompts[mid])}</textarea>'
+            f'  <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:6px">'
+            f'    <button type="submit">Save</button>'
+            f'    <button type="submit" name="reset" value="1" formnovalidate '
+            f'      onclick="return confirm(\'Reset {mid} prompt to default?\')" '
+            f'      style="background:#fff;color:#c33;border:1px solid #c33">Reset to default</button>'
+            f'  </div>'
+            f'</form>'
+        )
+
+    def _custom_mode_form(m: dict) -> str:
+        fg, bg = m["color"]
+        return (
+            f'<form method="post" action="/admin/custom_mode/upsert" style="margin-bottom:18px;border:1px solid #eee;border-radius:6px;padding:12px">'
+            f'  <input type="hidden" name="id" value="{html.escape(m["id"])}">'
+            f'  <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px">{_badge(m["id"])}'
+            f'    <input type="text" name="label" value="{html.escape(m["label"])}" placeholder="label" style="flex:1;font-size:13px;padding:5px 8px;border:1px solid #ddd;border-radius:4px">'
+            f'    <input type="color" name="color_fg" value="{html.escape(fg)}" title="text">'
+            f'    <input type="color" name="color_bg" value="{html.escape(bg)}" title="background">'
+            f'  </div>'
+            f'  <textarea name="prompt" rows="6" style="width:100%;font-family:ui-monospace,Menlo,monospace;'
+            f'    font-size:12px;padding:10px;border:1px solid #ddd;border-radius:6px;line-height:1.45">'
+            f'{html.escape(prompts[m["id"]])}</textarea>'
+            f'  <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:6px">'
+            f'    <button type="submit">Save</button>'
+            f'    <button type="submit" formaction="/admin/custom_mode/delete" formnovalidate '
+            f'      onclick="return confirm(\'Delete the {html.escape(m["id"])} mode?\')" '
+            f'      style="background:#fff;color:#c33;border:1px solid #c33">Delete</button>'
+            f'  </div>'
+            f'</form>'
+        )
+
+    builtin_prompts_html = "".join(_builtin_prompt_form(mid) for mid, info in modes.items() if info["builtin"])
+    custom_modes_html = "".join(_custom_mode_form(m) for m in custom_modes) or (
+        '<p class="sub" style="margin:0;color:#999">No custom modes yet. Add one below.</p>'
     )
 
     return f"""<!doctype html>
@@ -209,7 +255,7 @@ def render(nia_sources: list[dict] | None = None) -> str:
 <body>
   <div class="wrap">
     <h1>Concierge — Admin</h1>
-    <div class="nav"><a href="/">← live log</a></div>
+    <div class="nav"><a href="/">← live log</a> · <a href="/admin/insights">📊 insights</a></div>
 
     <div class="panel">
       <div class="stat-row">
@@ -295,10 +341,62 @@ def render(nia_sources: list[dict] | None = None) -> str:
     </div>
 
     <div class="panel">
-      <h2 style="margin-top:0">Mode prompts</h2>
-      <p class="sub" style="margin:-4px 0 12px">These are the Claude system prompts for each mode. Edit and save to override; reset clears the override and falls back to the baked-in default.</p>
-      {prompts_html}
+      <h2 style="margin-top:0">Mode prompts (built-in)</h2>
+      <p class="sub" style="margin:-4px 0 12px">Claude system prompts for the baked-in modes. Edit and save to override; reset clears the override and falls back to default.</p>
+      {builtin_prompts_html}
     </div>
+
+    <div class="panel">
+      <h2 style="margin-top:0">Custom modes</h2>
+      <p class="sub" style="margin:-4px 0 12px">Define your own modes (subject tag <code>[id]</code> activates them). Edit colors and prompts inline, or use the generator to draft a prompt from a one-line description.</p>
+
+      {custom_modes_html}
+
+      <h3 style="font-size:13px;margin:18px 0 6px;color:#555">Add a new mode</h3>
+      <details style="background:#fafafa;border:1px solid #eee;border-radius:6px;padding:10px 14px;margin:0 0 12px">
+        <summary style="cursor:pointer;font-size:12px;font-weight:600;color:#555;text-transform:uppercase;letter-spacing:0.5px">✨ Need a prompt? Generate one from a description</summary>
+        <div style="margin-top:10px">
+          <textarea id="gen-desc" rows="3" placeholder="e.g. Onboarding mode for new engineers — points them at entry-point files with one-line explanations" style="width:100%;font-size:13px;padding:8px;border:1px solid #ddd;border-radius:6px"></textarea>
+          <div style="display:flex;gap:8px;margin-top:6px">
+            <button type="button" id="gen-btn">Draft prompt</button>
+            <span id="gen-status" style="font-size:12px;color:#888;align-self:center"></span>
+          </div>
+        </div>
+      </details>
+      <form method="post" action="/admin/custom_mode/upsert" style="border:1px solid #eee;border-radius:6px;padding:12px">
+        <div style="display:flex;gap:8px;margin-bottom:8px">
+          <input type="text" name="id" pattern="[a-z][a-z0-9_]{{1,30}}" required placeholder="id (lowercase, e.g. product)" style="flex:0 0 200px;font-size:13px;padding:6px 8px;border:1px solid #ddd;border-radius:4px">
+          <input type="text" name="label" placeholder="label (e.g. Product)" style="flex:1;font-size:13px;padding:6px 8px;border:1px solid #ddd;border-radius:4px">
+          <input type="color" name="color_fg" value="#444" title="text color">
+          <input type="color" name="color_bg" value="#eee" title="background color">
+        </div>
+        <textarea id="new-mode-prompt" name="prompt" rows="8" placeholder="System prompt for this mode (or use the generator above)" style="width:100%;font-family:ui-monospace,Menlo,monospace;font-size:12px;padding:10px;border:1px solid #ddd;border-radius:6px;line-height:1.45"></textarea>
+        <div style="display:flex;justify-content:flex-end;margin-top:6px">
+          <button type="submit">Add mode</button>
+        </div>
+      </form>
+    </div>
+
+    <script{nonce_attr}>
+      document.getElementById('gen-btn')?.addEventListener('click', async () => {{
+        const desc = (document.getElementById('gen-desc').value || '').trim();
+        const status = document.getElementById('gen-status');
+        const out = document.getElementById('new-mode-prompt');
+        if (!desc) {{ status.textContent = 'enter a description first'; return; }}
+        status.textContent = 'drafting…';
+        try {{
+          const r = await fetch('/admin/custom_mode/generate', {{
+            method: 'POST',
+            headers: {{ 'Content-Type': 'application/json' }},
+            body: JSON.stringify({{ description: desc }}),
+          }});
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          const data = await r.json();
+          out.value = data.prompt || '';
+          status.textContent = 'drafted — review and edit before saving';
+        }} catch (e) {{ status.textContent = 'failed: ' + e.message; }}
+      }});
+    </script>
 
     <div class="panel">
       <h2 style="margin-top:0">Users ({len(users)})</h2>
@@ -342,14 +440,14 @@ def _inbox_label() -> str:
 # ---------- Routes ----------
 
 @router.get("/admin", response_class=HTMLResponse, dependencies=[Depends(_require_admin)])
-async def admin_page():
+async def admin_page(request: Request):
     import core
     try:
         sources = await core.nia_list_sources()
     except Exception as e:
         print(f"[admin] nia_list_sources failed: {e}")
         sources = []
-    return render(nia_sources=sources)
+    return render(nia_sources=sources, nonce=getattr(request.state, "csp_nonce", ""))
 
 
 @router.post("/admin/users/upsert", dependencies=[Depends(_require_admin)])
@@ -585,6 +683,87 @@ async def upload_source(
     _set_active_docs(active)
     _invalidate_cache_after_source_change(f"upload {label}")
     return RedirectResponse("/admin", status_code=303)
+
+
+@router.post("/admin/custom_mode/upsert", dependencies=[Depends(_require_admin)])
+async def upsert_custom_mode(
+    id: str = Form(...),
+    label: str = Form(""),
+    color_fg: str = Form("#444"),
+    color_bg: str = Form("#eee"),
+    prompt: str = Form(""),
+):
+    import core
+    mid = (id or "").strip().lower()
+    if not core.is_valid_mode_id(mid):
+        raise HTTPException(status_code=400, detail="invalid id (lowercase letters, digits, underscores; 2–31 chars; must start with a letter)")
+    if mid in core.BUILTIN_MODES:
+        raise HTTPException(status_code=400, detail=f"'{mid}' is a built-in mode; edit it via the built-in prompts panel instead")
+    cache.upsert_custom_mode(
+        mid=mid,
+        label=(label or mid).strip(),
+        color_fg=(color_fg or "#444").strip(),
+        color_bg=(color_bg or "#eee").strip(),
+        prompt=(prompt or "").strip(),
+    )
+    return RedirectResponse("/admin", status_code=303)
+
+
+@router.post("/admin/custom_mode/delete", dependencies=[Depends(_require_admin)])
+async def delete_custom_mode(id: str = Form(...)):
+    cache.delete_custom_mode((id or "").strip().lower())
+    return RedirectResponse("/admin", status_code=303)
+
+
+@router.post("/admin/custom_mode/generate", dependencies=[Depends(_require_admin)])
+async def generate_custom_mode(payload: dict = Body(...)):
+    import core
+    desc = (payload.get("description") if isinstance(payload, dict) else "") or ""
+    try:
+        prompt = core.generate_mode_prompt(desc)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        print(f"[admin] generate_mode_prompt failed: {e}")
+        raise HTTPException(status_code=502, detail=f"generation failed: {e}")
+    return JSONResponse({"prompt": prompt})
+
+
+@router.get("/admin/insights", response_class=HTMLResponse, dependencies=[Depends(_require_admin)])
+async def insights_page():
+    import insights
+    gaps = insights.find_capability_gaps()
+    rows = "".join(_gap_row(g) for g in gaps) or (
+        '<tr><td colspan="3" style="color:#999;text-align:center;padding:24px">No capability gaps detected yet. Send a few sales-mode questions through; whenever the answer says "not yet" / "limited" / "doesn\'t support", it shows up here.</td></tr>'
+    )
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>Concierge — Insights</title>
+<style>
+  body {{ font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+          background: #fafafa; color: #222; padding: 24px; max-width: 880px; margin: 0 auto; }}
+  h1 {{ font-size: 22px; margin: 0 0 4px; }}
+  .sub {{ color: #888; font-size: 13px; margin-bottom: 18px; }}
+  .nav a {{ color: #0a3a99; font-size: 13px; margin-right: 16px; }}
+  .panel {{ background: #fff; border-radius: 8px; padding: 16px 20px;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.04); }}
+  table {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
+  th, td {{ padding: 10px; border-bottom: 1px solid #f0f0f0; text-align: left; vertical-align: top; }}
+  th {{ font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; }}
+  .ask-count {{ font-size: 18px; font-weight: 600; color: #0a3a99; }}
+  .askers {{ font-size: 11px; color: #888; }}
+  .snippet {{ font-size: 12px; color: #555; margin-top: 6px; line-height: 1.5; }}
+  .all-q {{ font-size: 11px; color: #888; margin-top: 4px; }}
+</style></head><body>
+  <h1>Capability gaps — product opportunities</h1>
+  <div class="sub">Sales-mode answers that contained negative-capability markers (not yet, limited, doesn't support, etc.) — clustered and ranked by how many distinct people asked.</div>
+  <div class="nav"><a href="/admin">← admin</a> · <a href="/">live log</a></div>
+  <div class="panel">
+    <table>
+      <thead><tr><th>Asks</th><th>Gap (exemplar question)</th><th>Evidence</th></tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+  </div>
+</body></html>"""
 
 
 @router.post("/admin/prompt", dependencies=[Depends(_require_admin)])

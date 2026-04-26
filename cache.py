@@ -334,6 +334,44 @@ def get_setting(key: str, default: str | None = None) -> str | None:
     return row["value"] if row else default
 
 
+# ---------- Custom modes ----------
+
+def list_custom_modes() -> list[dict]:
+    raw = get_setting("custom_modes", "")
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    return [m for m in (data or []) if isinstance(m, dict) and m.get("id")]
+
+
+def upsert_custom_mode(mid: str, label: str, color_fg: str, color_bg: str, prompt: str) -> None:
+    """Add or update a custom mode entry. Caller validates id/uniqueness vs builtins."""
+    modes = list_custom_modes()
+    found = False
+    for m in modes:
+        if m.get("id") == mid:
+            m["label"] = label
+            m["color_fg"] = color_fg
+            m["color_bg"] = color_bg
+            m["prompt"] = prompt
+            found = True
+            break
+    if not found:
+        modes.append({
+            "id": mid, "label": label,
+            "color_fg": color_fg, "color_bg": color_bg, "prompt": prompt,
+        })
+    set_setting("custom_modes", json.dumps(modes))
+
+
+def delete_custom_mode(mid: str) -> None:
+    modes = [m for m in list_custom_modes() if m.get("id") != mid]
+    set_setting("custom_modes", json.dumps(modes))
+
+
 def set_setting(key: str, value: str) -> None:
     _init_db()
     with _lock, _connect() as conn:

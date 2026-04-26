@@ -12,19 +12,10 @@ import cache
 import core
 
 
-_MODE_COLORS = {
-    "eng": ("#0a7d3e", "#dcf5e6"),
-    "sales": ("#0a3a99", "#e0eafc"),
-    "marketing": ("#a8479a", "#fbe6f5"),
-    "support": ("#b3530a", "#fcecdc"),
-    "security": ("#990a0a", "#fbe0e0"),
-}
-
-
 def _strip_mode_prefix(question: str) -> tuple[str, str]:
     """Cache stores '[mode] question' — split it back for display."""
-    m = re.match(r"^\[([a-z]+)\]\s*(.*)$", question, flags=re.DOTALL)
-    if m and m.group(1) in _MODE_COLORS:
+    m = re.match(r"^\[([a-z][a-z0-9_]*)\]\s*(.*)$", question, flags=re.DOTALL)
+    if m and m.group(1) in core.all_modes():
         return m.group(1), m.group(2)
     return "eng", question
 
@@ -52,7 +43,8 @@ def _ago(ts: str | None) -> str:
 
 
 def _badge(mode: str) -> str:
-    fg, bg = _MODE_COLORS.get(mode, _MODE_COLORS["eng"])
+    info = core.all_modes().get(mode)
+    fg, bg = info["color"] if info else ("#444", "#eee")
     return (
         f'<span style="display:inline-block;padding:2px 8px;border-radius:4px;'
         f'font-size:11px;font-weight:600;letter-spacing:0.5px;'
@@ -140,8 +132,8 @@ def render_features_html() -> str:
     db_exists = os.path.exists(db_path)
     db_size = os.path.getsize(db_path) if db_exists else 0
 
-    # Voice / mode list
-    modes_html = " ".join(_badge(m) for m in ("eng", "sales", "marketing", "support", "security"))
+    # Voice / mode list — dynamic, includes any custom modes added via /admin
+    modes_html = " ".join(_badge(m) for m in core.all_modes().keys())
 
     # Indexed sources
     src_parts = []
@@ -202,8 +194,17 @@ def render_feed_html() -> str:
     )
 
 
-def render() -> str:
+def render(nonce: str = "") -> str:
     initial_feed = render_feed_html()
+    modes = list(core.all_modes().keys())
+    mode_options = "".join(
+        f'<option value="{html.escape(mid)}">{html.escape(mid)}</option>' for mid in modes
+    )
+    mode_pills = "".join(
+        f'<span class="pill mode-pill" data-mode="{html.escape(mid)}">{html.escape(mid)}</span>'
+        for mid in modes
+    )
+    nonce_attr = f' nonce="{html.escape(nonce)}"' if nonce else ""
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -312,13 +313,7 @@ def render() -> str:
 
     <div class="chat">
       <div class="chat-row">
-        <select id="mode">
-          <option value="eng">eng</option>
-          <option value="sales">sales</option>
-          <option value="marketing">marketing</option>
-          <option value="support">support</option>
-          <option value="security">security</option>
-        </select>
+        <select id="mode">{mode_options}</select>
         <input class="sender" id="sender" type="text" list="users" autocomplete="off" placeholder="from (e.g. you@team.com)">
         <datalist id="users"></datalist>
       </div>
@@ -332,17 +327,13 @@ def render() -> str:
     <div class="filterbar">
       <input id="search" type="text" placeholder="Search questions, senders, sources…" autocomplete="off">
       <span class="pill mode-pill active" data-mode="all">all</span>
-      <span class="pill mode-pill" data-mode="eng">eng</span>
-      <span class="pill mode-pill" data-mode="sales">sales</span>
-      <span class="pill mode-pill" data-mode="marketing">marketing</span>
-      <span class="pill mode-pill" data-mode="support">support</span>
-      <span class="pill mode-pill" data-mode="security">security</span>
+      {mode_pills}
     </div>
 
     <div id="feed-mount">{initial_feed}</div>
   </div>
 
-  <script>
+  <script{nonce_attr}>
     const mount = document.getElementById('feed-mount');
     const out = document.getElementById('chat-out');
     const send = document.getElementById('send');

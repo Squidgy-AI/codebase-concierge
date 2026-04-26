@@ -384,6 +384,51 @@ SYSTEM_PROMPTS = {
 }
 
 
+# Built-in mode display colors (foreground, background). Custom modes can override.
+MODE_COLORS = {
+    "eng": ("#0a7d3e", "#dcf5e6"),
+    "sales": ("#0a3a99", "#e0eafc"),
+    "marketing": ("#a8479a", "#fbe6f5"),
+    "support": ("#b3530a", "#fcecdc"),
+    "security": ("#990a0a", "#fbe0e0"),
+}
+BUILTIN_MODES = set(SYSTEM_PROMPTS.keys())
+
+_VALID_MODE_ID = re.compile(r"^[a-z][a-z0-9_]{1,30}$")
+
+
+def all_modes() -> dict[str, dict]:
+    """Merge built-ins with admin-defined custom modes. Returns
+    {id: {label, color: (fg,bg), prompt, builtin: bool}}."""
+    out: dict[str, dict] = {}
+    for mid, prompt in SYSTEM_PROMPTS.items():
+        out[mid] = {
+            "id": mid,
+            "label": mid,
+            "color": MODE_COLORS.get(mid, MODE_COLORS["eng"]),
+            "prompt": prompt,
+            "builtin": True,
+        }
+    for cm in cache.list_custom_modes():
+        mid = cm.get("id")
+        if not mid or mid in out:
+            continue  # custom can't shadow a built-in
+        fg = cm.get("color_fg") or "#444"
+        bg = cm.get("color_bg") or "#eee"
+        out[mid] = {
+            "id": mid,
+            "label": cm.get("label") or mid,
+            "color": (fg, bg),
+            "prompt": cm.get("prompt") or "",
+            "builtin": False,
+        }
+    return out
+
+
+def is_valid_mode_id(mid: str) -> bool:
+    return bool(mid and _VALID_MODE_ID.match(mid))
+
+
 # SENDER_MODES env var: comma-separated "email_or_@domain:mode" pairs.
 # Example: "sw@seth.co.uk:sales,@theai.team:eng,@4142.ltd:marketing"
 # Exact email beats domain. Subject tag still overrides everything.
@@ -440,7 +485,8 @@ def detect_mode(sender: str | None, subject: str | None) -> str:
       4. Default: eng
     """
     s = (subject or "").lower()
-    for mode in ("sales", "marketing", "support", "security", "eng"):
+    # Iterate every known mode (built-in + custom) — first subject tag wins.
+    for mode in all_modes().keys():
         if f"[{mode}]" in s:
             return mode
 
@@ -462,8 +508,14 @@ def detect_mode(sender: str | None, subject: str | None) -> str:
 
 
 def get_prompt(mode: str) -> str:
-    """Per-mode system prompt. Editable in /admin via the settings table —
-    falls back to the baked-in default."""
+    """Per-mode system prompt.
+    - Custom mode → its inline prompt from custom_modes.
+    - Built-in mode → settings override (set in /admin) OR baked-in default.
+    Unknown mode → eng default.
+    """
+    modes = all_modes()
+    if mode in modes and not modes[mode]["builtin"]:
+        return modes[mode]["prompt"] or SYSTEM_PROMPTS["eng"]
     default = SYSTEM_PROMPTS.get(mode, SYSTEM_PROMPTS["eng"])
     override = cache.get_setting(f"prompt_{mode}", "")
     return override.strip() if override and override.strip() else default
@@ -542,6 +594,7 @@ async def answer_codebase_question(
     thread_history: list[dict] | None = None,
     sender: str | None = None,
     mode: str = "eng",
+    cache_writes: bool = True,
 ) -> dict:
     """Channel-agnostic Q&A over indexed codebases.
 
@@ -587,7 +640,10 @@ async def answer_codebase_question(
     )
     answer_md = nia_context.get("content", "")
 
-    if cacheable:
+    # Only trusted channels (the AgentMail webhook) write to the shared cache.
+    # /skill/ask is read-only against the cache so a leaked SKILL_API_KEY can't
+    # poison answers served to email senders.
+    if cacheable and cache_writes:
         cache.store(cache_key, answer_html, answer_md, sources, engineers, sender)
 
     return {
@@ -598,3 +654,47 @@ async def answer_codebase_question(
         "cache_hit": False,
         "mode": mode,
     }
+
+
+# ---------- Prompt generator (admin helper) ----------
+
+_GENERATOR_META = """You write Claude system prompts for a codebase Q&A agent.
+The agent receives a Nia-retrieved code/doc context and answers via email/chat in a strict HTML format.
+
+The user describes a new "mode" — a voice/lens for the same brain. Output ONLY the system prompt body, no preamble, no markdown fence.
+
+Structure your output as:
+1. One sentence defining the role / lens.
+2. A "Tone:" line (e.g. "Tone: precise, customer-empathetic, no-jargon.")
+3. 3–5 mode-specific output rules as bullet points.
+4. Verbatim, append exactly:
+
+---FORMAT_RULES---
+
+The orchestrator will replace ---FORMAT_RULES--- with the shared formatting block; do NOT include the full format block yourself.
+
+Constraints:
+- No fluff, no marketing language.
+- Don't promise to "do your best" or "help the user" — describe what the OUTPUT looks like.
+- Keep it under 220 words.
+"""
+
+
+def generate_mode_prompt(description: str) -> str:
+    """Use Claude Haiku to draft a system prompt body for a new mode.
+    Returns a ready-to-paste prompt with the format-rules block stitched in."""
+    if not description.strip():
+        raise ValueError("description required")
+    msg = claude.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=600,
+        system=_GENERATOR_META,
+        messages=[{"role": "user", "content": description.strip()}],
+    )
+    body = (msg.content[0].text or "").strip()
+    # Replace the placeholder with the real format rules (or append if missing).
+    if "---FORMAT_RULES---" in body:
+        body = body.replace("---FORMAT_RULES---", _FORMAT_RULES.strip())
+    else:
+        body = body + "\n\n" + _FORMAT_RULES.strip()
+    return body
