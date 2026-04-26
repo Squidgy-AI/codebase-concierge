@@ -658,43 +658,77 @@ async def answer_codebase_question(
 
 # ---------- Prompt generator (admin helper) ----------
 
-_GENERATOR_META = """You write Claude system prompts for a codebase Q&A agent.
-The agent receives a Nia-retrieved code/doc context and answers via email/chat in a strict HTML format.
+_GENERATOR_META = """You design new "modes" for a codebase Q&A agent that runs the same brain (Nia-retrieved code + Claude composition) but switches voice/lens depending on the asker.
 
-The user describes a new "mode" — a voice/lens for the same brain. Output ONLY the system prompt body, no preamble, no markdown fence.
+Given the user's one-line description, return JSON ONLY (no markdown fence, no preamble) with these exact fields:
+{
+  "id": "<lowercase slug, 2-31 chars, [a-z0-9_], starts with a letter>",
+  "label": "<Title Case display name, 1-3 words>",
+  "prompt": "<system prompt body, see structure below>"
+}
 
-Structure your output as:
+The "prompt" field must be structured as:
 1. One sentence defining the role / lens.
-2. A "Tone:" line (e.g. "Tone: precise, customer-empathetic, no-jargon.")
+2. A "Tone:" line (e.g. "Tone: precise, customer-empathetic, no jargon.")
 3. 3–5 mode-specific output rules as bullet points.
-4. Verbatim, append exactly:
+4. End with the literal token ---FORMAT_RULES--- on its own line. The orchestrator will substitute the shared format block.
 
----FORMAT_RULES---
-
-The orchestrator will replace ---FORMAT_RULES--- with the shared formatting block; do NOT include the full format block yourself.
-
-Constraints:
+Constraints on the prompt body:
 - No fluff, no marketing language.
 - Don't promise to "do your best" or "help the user" — describe what the OUTPUT looks like.
-- Keep it under 220 words.
+- Under 220 words.
+
+Constraints on id/label:
+- id MUST NOT be one of: eng, sales, marketing, support, security (reserved built-ins).
+- label is short and human; id is the subject-tag slug (`[id]`).
+
+Return only the JSON object — no other text.
 """
 
 
-def generate_mode_prompt(description: str) -> str:
-    """Use Claude Haiku to draft a system prompt body for a new mode.
-    Returns a ready-to-paste prompt with the format-rules block stitched in."""
+def _slugify(text: str) -> str:
+    s = re.sub(r"[^a-z0-9_]+", "_", (text or "").lower()).strip("_")
+    s = re.sub(r"_+", "_", s)
+    if not s or not s[0].isalpha():
+        s = "mode_" + s
+    return s[:31]
+
+
+def generate_mode_metadata(description: str) -> dict:
+    """Use Claude Haiku to draft {id, label, prompt} for a new mode."""
     if not description.strip():
         raise ValueError("description required")
     msg = claude.messages.create(
         model="claude-haiku-4-5-20251001",
-        max_tokens=600,
+        max_tokens=900,
         system=_GENERATOR_META,
         messages=[{"role": "user", "content": description.strip()}],
     )
-    body = (msg.content[0].text or "").strip()
-    # Replace the placeholder with the real format rules (or append if missing).
+    raw = (msg.content[0].text or "").strip()
+    # Tolerate accidental fences.
+    if raw.startswith("```"):
+        raw = re.sub(r"^```[a-zA-Z]*\n?|\n?```$", "", raw).strip()
+    import json as _json
+    try:
+        data = _json.loads(raw)
+    except _json.JSONDecodeError:
+        # Last-ditch: take the whole output as the prompt body and synthesize id/label.
+        data = {"id": "", "label": "", "prompt": raw}
+
+    label = (data.get("label") or "").strip() or description.strip()[:30]
+    candidate_id = (data.get("id") or "").strip().lower()
+    if not is_valid_mode_id(candidate_id) or candidate_id in BUILTIN_MODES:
+        candidate_id = _slugify(label)
+        if candidate_id in BUILTIN_MODES or not is_valid_mode_id(candidate_id):
+            candidate_id = _slugify(label) + "_mode"
+    body = (data.get("prompt") or "").strip()
     if "---FORMAT_RULES---" in body:
         body = body.replace("---FORMAT_RULES---", _FORMAT_RULES.strip())
     else:
         body = body + "\n\n" + _FORMAT_RULES.strip()
-    return body
+    return {"id": candidate_id, "label": label, "prompt": body}
+
+
+# Back-compat for any older caller.
+def generate_mode_prompt(description: str) -> str:
+    return generate_mode_metadata(description)["prompt"]

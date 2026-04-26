@@ -381,7 +381,12 @@ def render(nia_sources: list[dict] | None = None, nonce: str = "") -> str:
       document.getElementById('gen-btn')?.addEventListener('click', async () => {{
         const desc = (document.getElementById('gen-desc').value || '').trim();
         const status = document.getElementById('gen-status');
-        const out = document.getElementById('new-mode-prompt');
+        const promptOut = document.getElementById('new-mode-prompt');
+        // The new-mode form's id/label inputs are the only un-named ones in the wrap;
+        // grab them via the form's name attributes for stability.
+        const newForm = promptOut?.closest('form');
+        const idInput = newForm?.querySelector('input[name="id"]');
+        const labelInput = newForm?.querySelector('input[name="label"]');
         if (!desc) {{ status.textContent = 'enter a description first'; return; }}
         status.textContent = 'drafting…';
         try {{
@@ -392,8 +397,11 @@ def render(nia_sources: list[dict] | None = None, nonce: str = "") -> str:
           }});
           if (!r.ok) throw new Error('HTTP ' + r.status);
           const data = await r.json();
-          out.value = data.prompt || '';
-          status.textContent = 'drafted — review and edit before saving';
+          promptOut.value = data.prompt || '';
+          // Only fill id/label if the operator hasn't started typing them.
+          if (idInput && !idInput.value.trim() && data.id) idInput.value = data.id;
+          if (labelInput && !labelInput.value.trim() && data.label) labelInput.value = data.label;
+          status.textContent = `drafted — id: ${{data.id || '?'}} · label: ${{data.label || '?'}} — review and edit before saving`;
         }} catch (e) {{ status.textContent = 'failed: ' + e.message; }}
       }});
     </script>
@@ -720,13 +728,13 @@ async def generate_custom_mode(payload: dict = Body(...)):
     import core
     desc = (payload.get("description") if isinstance(payload, dict) else "") or ""
     try:
-        prompt = core.generate_mode_prompt(desc)
+        meta = core.generate_mode_metadata(desc)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        print(f"[admin] generate_mode_prompt failed: {e}")
+        print(f"[admin] generate_mode_metadata failed: {e}")
         raise HTTPException(status_code=502, detail=f"generation failed: {e}")
-    return JSONResponse({"prompt": prompt})
+    return JSONResponse(meta)
 
 
 @router.get("/admin/insights", response_class=HTMLResponse, dependencies=[Depends(_require_admin)])
