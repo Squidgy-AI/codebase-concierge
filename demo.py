@@ -131,6 +131,24 @@ def _build_beats() -> list[dict]:
                 "Closing line: \"Advisory only — but the citations are real. The agent can't invent paths it doesn't have.\"",
             ],
         },
+        {
+            "id": "beat7-meta",
+            "label": "Beat 7 — Add a new mode live (optional, meta)",
+            "question": "(this beat is operated from /admin, not the chat box)",
+            "mode": "eng",
+            "sender": "",
+            "prewarm": False,
+            "notes": [
+                "This is the \"it's not hardcoded\" beat. Open /admin in a second tab.",
+                "Scroll to the Custom modes panel → expand ✨ \"Need a prompt? Generate one from a description\".",
+                "Type one sentence — e.g. \"Onboarding mode for new engineers — points them at entry-point files with one-line explanations.\" Click Draft prompt.",
+                "Show the audience: id, label, and the full system prompt all auto-fill in ~3s (Claude Haiku call).",
+                "Click Add mode. Switch back to the dashboard tab — refresh.",
+                "Show the mode pill is now in the filter bar AND the chat-mode dropdown AND the user-add dropdown. \"It propagates everywhere.\"",
+                "Optional: send a question with the new mode (subject tag like [onboarding]) live. ~25s, but lands the punchline.",
+                "Closing line: \"The whole demo you just watched? Anyone could rebuild any of those modes from a one-line description. The infrastructure is the product.\"",
+            ],
+        },
     ]
 
 
