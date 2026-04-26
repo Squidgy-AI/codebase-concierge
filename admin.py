@@ -210,6 +210,10 @@ def render(nia_sources: list[dict] | None = None, nonce: str = "") -> str:
         )
 
     builtin_prompts_html = "".join(_builtin_prompt_form(mid) for mid, info in modes.items() if info["builtin"])
+    user_mode_options = "".join(
+        f'<option value="{html.escape(mid)}">{html.escape(mid)}</option>'
+        for mid in modes.keys()
+    )
     custom_modes_html = "".join(_custom_mode_form(m) for m in custom_modes) or (
         '<p class="sub" style="margin:0;color:#999">No custom modes yet. Add one below.</p>'
     )
@@ -415,13 +419,7 @@ def render(nia_sources: list[dict] | None = None, nonce: str = "") -> str:
       <form method="post" action="/admin/users/upsert" class="form-row">
         <input type="email" name="email" required placeholder="email@team.com">
         <input type="text" name="display_name" placeholder="display name (optional)">
-        <select name="default_mode" required>
-          <option value="eng">eng</option>
-          <option value="sales">sales</option>
-          <option value="marketing">marketing</option>
-          <option value="support">support</option>
-          <option value="security">security</option>
-        </select>
+        <select name="default_mode" required>{user_mode_options}</select>
         <button type="submit">Add / update</button>
       </form>
     </div>
