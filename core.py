@@ -9,9 +9,43 @@ import os
 import re
 import subprocess
 import httpx
+import bleach
 from anthropic import Anthropic
 
 import cache
+
+
+# ---------- HTML sanitization (defense against prompt-injected XSS) ----------
+
+_ALLOWED_TAGS = [
+    "p", "br", "strong", "em", "code", "pre",
+    "ul", "ol", "li", "h3", "h4", "a", "blockquote",
+]
+_ALLOWED_ATTRS = {"a": ["href", "title"]}
+_ALLOWED_PROTOCOLS = ["http", "https", "mailto"]
+
+
+def sanitize_html(raw: str) -> str:
+    """Allowlist-based sanitizer. Strips <script>, on*, style, javascript: URLs.
+    Forces target=_blank rel=noopener on links."""
+    if not raw:
+        return ""
+    cleaned = bleach.clean(
+        raw,
+        tags=_ALLOWED_TAGS,
+        attributes=_ALLOWED_ATTRS,
+        protocols=_ALLOWED_PROTOCOLS,
+        strip=True,
+        strip_comments=True,
+    )
+    # Force target=_blank rel=noopener on every <a>. bleach already stripped
+    # any pre-existing target/rel since they're not in _ALLOWED_ATTRS.
+    return re.sub(
+        r'<a\s+([^>]*?)href=',
+        r'<a target="_blank" rel="noopener noreferrer" \1href=',
+        cleaned,
+        flags=re.IGNORECASE,
+    )
 
 
 def _clean_secret(name: str) -> str:
@@ -86,15 +120,45 @@ async def nia_get_source(source_id: str) -> dict:
         return r.json()
 
 
-async def nia_get_source_content(source_id: str) -> dict:
-    """Pull the raw indexed content (text body + metadata) for a source."""
+async def nia_get_source_content(source_id: str, path: str | None = None) -> dict:
+    """Pull the raw indexed content for a source.
+    Documentation sources require ?path=<doc-path>; PDFs require ?page= or ?tree_node_id=."""
+    params = {"path": path} if path else None
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.get(
             f"{NIA_BASE}/v2/sources/{source_id}/content",
             headers={"Authorization": f"Bearer {NIA_API_KEY}"},
+            params=params,
         )
         r.raise_for_status()
         return r.json()
+
+
+async def nia_get_source_tree(source_id: str) -> dict:
+    """Tree of paths/pages for a source. Used to resolve a default `path` for content."""
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.get(
+            f"{NIA_BASE}/v2/sources/{source_id}/tree",
+            headers={"Authorization": f"Bearer {NIA_API_KEY}"},
+        )
+        r.raise_for_status()
+        return r.json()
+
+
+def _flatten_tree_paths(tree: dict | None) -> list[str]:
+    """Walk Nia's nested tree dict and yield every leaf path string."""
+    out: list[str] = []
+    def _walk(node):
+        if isinstance(node, str):
+            out.append(node)
+        elif isinstance(node, dict):
+            for v in node.values():
+                _walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                _walk(v)
+    _walk((tree or {}).get("tree"))
+    return out
 
 
 async def nia_list_sources() -> list[dict]:
@@ -202,6 +266,39 @@ def last_author(source: str) -> dict | None:
     return {"name": name, "email": email, "date": date, "source": source}
 
 
+_RECENCY_RE = re.compile(r"\b(what'?s\s+new|recent|latest|shipped|changelog|release\s*notes|this\s+(week|sprint|month))\b", re.IGNORECASE)
+
+
+def needs_recent_commits(question: str, mode: str) -> bool:
+    """Marketing always wants commit context; other modes only if the question asks for it."""
+    return mode == "marketing" or bool(_RECENCY_RE.search(question or ""))
+
+
+def recent_commits(days: int = 14, max_per_repo: int = 20) -> str:
+    """git log across every local repo clone. Returns a plain-text block; empty if no clones."""
+    if not os.path.isdir(REPOS_DIR):
+        return ""
+    blocks = []
+    for entry in sorted(os.listdir(REPOS_DIR)):
+        repo_dir = os.path.join(REPOS_DIR, entry)
+        if not os.path.isdir(os.path.join(repo_dir, ".git")):
+            continue
+        try:
+            out = subprocess.run(
+                ["git", "-C", repo_dir, "log",
+                 f"--since={days} days ago",
+                 f"--max-count={max_per_repo}",
+                 "--no-merges",
+                 "--pretty=format:%h %s (%an, %ar)"],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+        except (subprocess.SubprocessError, FileNotFoundError):
+            continue
+        if out.returncode == 0 and out.stdout.strip():
+            blocks.append(f"## {entry}\n{out.stdout.strip()}")
+    return "\n\n".join(blocks)
+
+
 def cited_engineers(sources: list[str], max_results: int = 3) -> list[dict]:
     seen, result = set(), []
     for s in sources:
@@ -274,6 +371,16 @@ SYSTEM_PROMPTS = {
         "- If BUG: suggest a workaround. If EXPECTED: explain the design intent in plain language.\n\n"
         + _FORMAT_RULES
     ),
+    "security": (
+        "You are a security engineer reviewing the code Nia retrieved for risks. "
+        "Tone: precise, advisory, no-FUD.\n"
+        "- Output a <ul> of findings. Each <li> starts with a severity in <strong>: HIGH / MED / LOW.\n"
+        "- Each finding states what (the issue), where (cite a file from the provided sources — never invent paths), and a one-line remediation.\n"
+        "- Look for: missing auth/authz, unvalidated input, injection (SQL/cmd/template/XSS), unsafe deserialization, hard-coded secrets, predictable randomness, missing rate limits, insecure defaults, dependency-level red flags Nia surfaced.\n"
+        "- If the retrieved code is too narrow to assess (e.g. only test files), say so plainly and suggest a broader question. Do NOT invent issues.\n"
+        "- End with a one-line disclaimer: \"Advisory only — not a substitute for a full security review.\"\n\n"
+        + _FORMAT_RULES
+    ),
 }
 
 
@@ -333,7 +440,7 @@ def detect_mode(sender: str | None, subject: str | None) -> str:
       4. Default: eng
     """
     s = (subject or "").lower()
-    for mode in ("sales", "marketing", "support", "eng"):
+    for mode in ("sales", "marketing", "support", "security", "eng"):
         if f"[{mode}]" in s:
             return mode
 
@@ -368,6 +475,7 @@ def compose_answer_html(
     thread_history: list[dict],
     engineers: list[dict] | None = None,
     mode: str = "eng",
+    commits_text: str = "",
 ) -> str:
     def _fmt(m: dict) -> str:
         sender = (m.get("from_") or [""])[0] if isinstance(m.get("from_"), list) else m.get("from_", "")
@@ -398,11 +506,15 @@ def compose_answer_html(
             "content": (
                 f"<thread_history>\n{history_text}\n</thread_history>\n\n"
                 f"<nia_draft>\n{nia_draft}\n</nia_draft>\n\n"
+                f"<recent_commits>\n{commits_text}\n</recent_commits>\n\n"
                 f"<sources_html>\n<ul>\n{sources_html}\n</ul>\n</sources_html>\n\n"
                 f"<engineers_html>\n{engineers_html}\n</engineers_html>\n\n"
                 f"<question>{question}</question>\n\n"
-                "Write the HTML email reply. Embed the sources list at the end, "
-                "then if engineers_html is non-empty, append it verbatim after Sources."
+                "Write the HTML email reply. If <recent_commits> is non-empty and the "
+                "question is about recency / what's new / what shipped, ground your "
+                "answer in those commits (translate them into user-visible benefits for "
+                "marketing mode; cite by short hash if useful). Embed the sources list "
+                "at the end, then if engineers_html is non-empty, append it verbatim."
             ),
         }],
     )
@@ -410,7 +522,10 @@ def compose_answer_html(
     html = re.sub(r"<p>\s*(&nbsp;|&#160;)?\s*</p>", "", html)
     html = re.sub(r"<br\s*/?>\s*<br\s*/?>", "<br>", html)
     html = re.sub(r">\s+<", "><", html)
-    return html.strip()
+    # Hard guarantee: model output is treated as untrusted. Strip <script>,
+    # event handlers, javascript: URLs, etc. before this HTML ever reaches
+    # the cache, the email reply, or the dashboard.
+    return sanitize_html(html.strip())
 
 
 # ---------- Public entry point ----------
@@ -466,7 +581,10 @@ async def answer_codebase_question(
     nia_context = await nia_query(question)
     sources = _normalize_sources(nia_context.get("sources", []))
     engineers = cited_engineers(sources)
-    answer_html = compose_answer_html(question, nia_context, history, engineers, mode=mode)
+    commits_text = recent_commits() if needs_recent_commits(question, mode) else ""
+    answer_html = compose_answer_html(
+        question, nia_context, history, engineers, mode=mode, commits_text=commits_text,
+    )
     answer_md = nia_context.get("content", "")
 
     if cacheable:

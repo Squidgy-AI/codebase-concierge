@@ -257,7 +257,7 @@ def upsert_user(email: str, display_name: str | None, default_mode: str) -> None
     email = (email or "").strip().lower()
     if not email or "@" not in email:
         raise ValueError("invalid email")
-    if default_mode not in ("eng", "sales", "marketing", "support"):
+    if default_mode not in ("eng", "sales", "marketing", "support", "security"):
         raise ValueError("invalid mode")
     with _lock, _connect() as conn:
         conn.execute(

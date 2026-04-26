@@ -45,6 +45,7 @@ _MODE_COLORS = {
     "sales": ("#0a3a99", "#e0eafc"),
     "marketing": ("#a8479a", "#fbe6f5"),
     "support": ("#b3530a", "#fcecdc"),
+    "security": ("#990a0a", "#fbe0e0"),
 }
 
 
@@ -94,7 +95,7 @@ def render(nia_sources: list[dict] | None = None) -> str:
     lockdown = cache.get_setting("lockdown", "0") == "1"
     cc_enabled = cache.get_setting("auto_cc_enabled", "0") == "1"
     s = cache.stats()
-    prompts = {m: core.get_prompt(m) for m in ("eng", "sales", "marketing", "support")}
+    prompts = {m: core.get_prompt(m) for m in ("eng", "sales", "marketing", "support", "security")}
     active_repos = core.get_active_repos()
     active_docs = core.get_active_data_sources()
     cache_ttl_hours = cache.get_setting("cache_ttl_hours", "168") or "168"
@@ -164,7 +165,7 @@ def render(nia_sources: list[dict] | None = None) -> str:
         f'      style="background:#fff;color:#c33;border:1px solid #c33">Reset to default</button>'
         f'  </div>'
         f'</form>'
-        for m in ("eng", "sales", "marketing", "support")
+        for m in ("eng", "sales", "marketing", "support", "security")
     )
 
     return f"""<!doctype html>
@@ -313,6 +314,7 @@ def render(nia_sources: list[dict] | None = None) -> str:
           <option value="sales">sales</option>
           <option value="marketing">marketing</option>
           <option value="support">support</option>
+          <option value="security">security</option>
         </select>
         <button type="submit">Add / update</button>
       </form>
@@ -401,45 +403,82 @@ async def purge_cache():
 
 
 @router.get("/admin/source/{source_id}/view", response_class=HTMLResponse, dependencies=[Depends(_require_admin)])
-async def view_source(source_id: str):
+async def view_source(source_id: str, path: str | None = None):
     import core
     try:
         meta = await core.nia_get_source(source_id)
     except Exception as e:
         meta = {"error": str(e)}
+
+    # Documentation sources require a `path`. Repo sources don't take one.
+    paths: list[str] = []
+    src_type = (meta.get("type") if isinstance(meta, dict) else "") or ""
+    if src_type == "documentation":
+        try:
+            tree = await core.nia_get_source_tree(source_id)
+            paths = sorted(set(core._flatten_tree_paths(tree)))
+        except Exception as e:
+            paths = []
+            tree_err = str(e)  # noqa: F841
+
+    chosen_path = path or (paths[0] if paths else None)
+
     body = ""
     try:
-        content = await core.nia_get_source_content(source_id)
-        # Nia returns variable shapes; surface the most useful free-text fields.
+        content = await core.nia_get_source_content(source_id, path=chosen_path)
         for key in ("content", "text", "body", "raw"):
             v = content.get(key) if isinstance(content, dict) else None
             if isinstance(v, str) and v.strip():
                 body = v
                 break
         if not body and isinstance(content, dict):
-            # Fall back to JSON dump so the operator at least sees structure.
             import json as _json
             body = _json.dumps(content, indent=2)[:200_000]
     except Exception as e:
         body = f"(failed to fetch content: {e})"
 
     title = (meta.get("display_name") or meta.get("identifier") or source_id) if isinstance(meta, dict) else source_id
+
+    paths_html = ""
+    if paths:
+        items = "".join(
+            f'<li><a href="/admin/source/{html.escape(source_id)}/view?path={html.escape(p)}"'
+            f'{" class=\"active\"" if p == chosen_path else ""}>{html.escape(p)}</a></li>'
+            for p in paths
+        )
+        paths_html = f'<aside class="tree"><strong>pages ({len(paths)})</strong><ul>{items}</ul></aside>'
+
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>{html.escape(title)}</title>
 <style>
   body {{ font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-          background: #fafafa; padding: 24px; max-width: 880px; margin: 0 auto; }}
+          background: #fafafa; padding: 24px; max-width: 1100px; margin: 0 auto; }}
   h1 {{ font-size: 18px; margin: 0 0 4px; }}
   .meta {{ font-size: 12px; color: #888; margin-bottom: 16px; }}
   .nav a {{ color: #0a3a99; font-size: 13px; }}
+  .layout {{ display: grid; grid-template-columns: {('260px 1fr' if paths else '1fr')}; gap: 16px; align-items: start; }}
+  aside.tree {{ background: #fff; border: 1px solid #eee; border-radius: 8px; padding: 12px;
+                font-size: 12px; max-height: 80vh; overflow: auto; }}
+  aside.tree ul {{ list-style: none; padding: 0; margin: 8px 0 0; }}
+  aside.tree li {{ margin: 2px 0; }}
+  aside.tree a {{ color: #0a3a99; text-decoration: none; word-break: break-all; }}
+  aside.tree a.active {{ font-weight: 600; color: #c33; }}
   pre {{ background: #fff; border: 1px solid #eee; border-radius: 8px;
          padding: 16px; white-space: pre-wrap; word-wrap: break-word;
-         font-family: ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.5; }}
+         font-family: ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.5; margin: 0; }}
 </style></head><body>
   <div class="nav"><a href="/admin">← admin</a></div>
   <h1>{html.escape(title)}</h1>
-  <div class="meta">id: <code>{html.escape(source_id)}</code> · type: {html.escape(str(meta.get('type','?')) if isinstance(meta, dict) else '?')} · status: {html.escape(str(meta.get('status','?')) if isinstance(meta, dict) else '?')}</div>
-  <pre>{html.escape(body or '(empty)')}</pre>
+  <div class="meta">
+    id: <code>{html.escape(source_id)}</code> ·
+    type: {html.escape(str(src_type or '?'))} ·
+    status: {html.escape(str(meta.get('status','?')) if isinstance(meta, dict) else '?')}
+    {f' · viewing: <code>{html.escape(chosen_path)}</code>' if chosen_path else ''}
+  </div>
+  <div class="layout">
+    {paths_html}
+    <pre>{html.escape(body or '(empty)')}</pre>
+  </div>
 </body></html>"""
 
 
@@ -554,7 +593,7 @@ async def set_prompt(
     prompt: str = Form(""),
     reset: str = Form(""),
 ):
-    if mode not in ("eng", "sales", "marketing", "support"):
+    if mode not in ("eng", "sales", "marketing", "support", "security"):
         raise HTTPException(status_code=400, detail="invalid mode")
     if reset:
         cache.set_setting(f"prompt_{mode}", "")

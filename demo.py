@@ -28,7 +28,7 @@ def _dash_link(question: str, mode: str = "eng", sender: str = "") -> str:
 
 
 def _users_by_mode() -> dict[str, list[str]]:
-    out: dict[str, list[str]] = {"eng": [], "sales": [], "marketing": [], "support": []}
+    out: dict[str, list[str]] = {"eng": [], "sales": [], "marketing": [], "support": [], "security": []}
     for u in cache.list_users():
         out.setdefault(u["default_mode"], []).append(u["email"])
     return out
@@ -44,6 +44,7 @@ def _build_beats() -> list[dict]:
     eng = (by_mode.get("eng") or [""])[0]
     sales = (by_mode.get("sales") or [""])[0]
     mktg = (by_mode.get("marketing") or [""])[0]
+    sec = (by_mode.get("security") or [""])[0] or eng
 
     return [
         {
@@ -114,6 +115,20 @@ def _build_beats() -> list[dict]:
                 "Skip if running short. Otherwise: send live.",
                 "When it returns: hook + bullets + suggested headline. Reuses the same brain for content ideation.",
                 "This is the \"one inbox, multiple modes\" punchline — code, sales, marketing, support all share the source of truth.",
+            ],
+        },
+        {
+            "id": "beat6-security",
+            "label": "Beat 6 — Security review (live, optional)",
+            "question": "[security] Review Hono's middleware composition and request handling for security risks — auth gaps, input validation, or unsafe defaults a self-hosted user should know about.",
+            "mode": "security",
+            "sender": sec,
+            "prewarm": False,
+            "notes": [
+                "Click ▶. Subject tag forces security mode regardless of sender.",
+                "While Nia runs (~25s): \"Same brain, but the lens changes — now it's a security review of the retrieved code.\"",
+                "When it returns: each finding is tagged HIGH/MED/LOW with a real cited file and a one-line remediation.",
+                "Closing line: \"Advisory only — but the citations are real. The agent can't invent paths it doesn't have.\"",
             ],
         },
     ]

@@ -17,6 +17,7 @@ _MODE_COLORS = {
     "sales": ("#0a3a99", "#e0eafc"),
     "marketing": ("#a8479a", "#fbe6f5"),
     "support": ("#b3530a", "#fcecdc"),
+    "security": ("#990a0a", "#fbe0e0"),
 }
 
 
@@ -140,7 +141,7 @@ def render_features_html() -> str:
     db_size = os.path.getsize(db_path) if db_exists else 0
 
     # Voice / mode list
-    modes_html = " ".join(_badge(m) for m in ("eng", "sales", "marketing", "support"))
+    modes_html = " ".join(_badge(m) for m in ("eng", "sales", "marketing", "support", "security"))
 
     # Indexed sources
     src_parts = []
@@ -316,6 +317,7 @@ def render() -> str:
           <option value="sales">sales</option>
           <option value="marketing">marketing</option>
           <option value="support">support</option>
+          <option value="security">security</option>
         </select>
         <input class="sender" id="sender" type="text" list="users" autocomplete="off" placeholder="from (e.g. you@team.com)">
         <datalist id="users"></datalist>
@@ -334,6 +336,7 @@ def render() -> str:
       <span class="pill mode-pill" data-mode="sales">sales</span>
       <span class="pill mode-pill" data-mode="marketing">marketing</span>
       <span class="pill mode-pill" data-mode="support">support</span>
+      <span class="pill mode-pill" data-mode="security">security</span>
     </div>
 
     <div id="feed-mount">{initial_feed}</div>
