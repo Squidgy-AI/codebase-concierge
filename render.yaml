@@ -5,9 +5,17 @@ services:
     plan: free
     buildCommand: |
       pip install -r requirements.txt
-      mkdir -p repos
-      [ -d repos/hono ] || git clone --depth=300 https://github.com/honojs/hono.git repos/hono
-      [ -d repos/node-server ] || git clone --depth=300 https://github.com/honojs/node-server.git repos/node-server
+      mkdir -p "${REPOS_DIR:-repos}"
+      # Clone every repo declared in NIA_REPOS so git blame works for cited files.
+      # Private repos will fail silently; they can still be answered (just no engineer attribution).
+      for entry in $(echo "${NIA_REPOS:-}" | tr ',' ' '); do
+        repo_name="${entry##*/}"
+        target="${REPOS_DIR:-repos}/$repo_name"
+        if [ -n "$repo_name" ] && [ ! -d "$target/.git" ]; then
+          echo "[build] cloning $entry → $target"
+          git clone --depth=300 "https://github.com/$entry.git" "$target" || echo "[build] clone failed (private repo? check GITHUB_TOKEN)"
+        fi
+      done
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: ANTHROPIC_API_KEY

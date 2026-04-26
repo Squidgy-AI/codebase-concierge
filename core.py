@@ -235,15 +235,52 @@ def _normalize_sources(sources: list) -> list[str]:
 
 # ---------- Git blame (auto-CC differentiator) ----------
 
+# In-process cache: repos we've already attempted to clone (success or fail) so
+# we don't retry on every blame call.
+_clone_attempts: set[str] = set()
+
+
+def ensure_repo_cloned(org: str, repo: str, depth: int = 300) -> bool:
+    """Best-effort lazy clone of a public GitHub repo into REPOS_DIR.
+    Returns True if the repo is available locally afterwards. Skips work if the
+    clone already exists. Caches failures so we don't hammer GitHub on every miss."""
+    repo_dir = os.path.join(REPOS_DIR, repo)
+    git_dir = os.path.join(repo_dir, ".git")
+    if os.path.isdir(git_dir):
+        return True
+    key = f"{org}/{repo}"
+    if key in _clone_attempts:
+        return False
+    _clone_attempts.add(key)
+    os.makedirs(REPOS_DIR, exist_ok=True)
+    url = f"https://github.com/{org}/{repo}.git"
+    try:
+        out = subprocess.run(
+            ["git", "clone", f"--depth={depth}", url, repo_dir],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError) as e:
+        print(f"[clone] {key} failed: {e}")
+        return False
+    if out.returncode != 0:
+        print(f"[clone] {key} failed: {out.stderr.strip()[:200]}")
+        return False
+    print(f"[clone] {key} cloned to {repo_dir}")
+    return True
+
+
 def _source_to_local(source: str) -> tuple[str, str] | None:
-    """Map 'honojs/hono/src/hono.ts' → (repo_dir, relative_path) if a local clone exists."""
+    """Map 'honojs/hono/src/hono.ts' → (repo_dir, relative_path).
+    Lazily clones the repo if we haven't seen it before — slow on first hit,
+    fast forever after."""
     parts = source.split("/", 2)
     if len(parts) < 3:
         return None
-    _org, repo, path = parts[0], parts[1], parts[2]
+    org, repo, path = parts[0], parts[1], parts[2]
     repo_dir = os.path.join(REPOS_DIR, repo)
     if not os.path.isdir(os.path.join(repo_dir, ".git")):
-        return None
+        if not ensure_repo_cloned(org, repo):
+            return None
     return repo_dir, path
 
 

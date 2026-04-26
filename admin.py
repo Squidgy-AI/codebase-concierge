@@ -615,6 +615,13 @@ async def add_repo(repo: str = Form(...)):
         # Common case: Nia rejects private/auth-required repos. Surface but still accept
         # the addition so the operator can fix the index out-of-band.
         print(f"[admin] nia_index_repo failed for {repo}: {e}")
+    # Best-effort local clone so git blame works for cited files. Doesn't block
+    # the response if it fails (e.g. private repo without GITHUB_TOKEN).
+    try:
+        org, name = repo.split("/", 1)
+        core.ensure_repo_cloned(org, name)
+    except Exception as e:
+        print(f"[admin] local clone failed for {repo}: {e}")
     active = core.get_active_repos()
     if repo not in active:
         active.append(repo)
