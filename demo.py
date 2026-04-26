@@ -1,9 +1,9 @@
 """
-/demo page — quick-fire links and dashboard deep-links to demonstrate every feature.
+/demo page — beat-by-beat runbook matching the live demo script.
 
-Senders are pulled from the configured users table so the runbook always uses
-real, recognized addresses. Cache-hit demo deliberately uses a *new* sender so
-the audience sees the "previously answered for X" line trigger.
+Each beat has a `prewarm` flag. Only prewarmed beats are seeded into the
+cache by the admin "Pre-warm for demo" button — the others stay genuinely
+fresh so the audience sees real Nia/Claude latency on stage.
 """
 import html
 import os
@@ -20,143 +20,143 @@ def _mailto(subject: str, body: str) -> str:
     return f"mailto:{_INBOX}?{qs}"
 
 
-def _dash_link(question: str, mode: str = "eng", sender: str = "", autosend: bool = False) -> str:
+def _dash_link(question: str, mode: str = "eng", sender: str = "") -> str:
     params = {"question": question, "mode": mode}
     if sender:
         params["sender"] = sender
-    if autosend:
-        params["autosend"] = "1"
     return "/?" + urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
 
 
 def _users_by_mode() -> dict[str, list[str]]:
-    """Group configured users by their default mode."""
     out: dict[str, list[str]] = {"eng": [], "sales": [], "marketing": [], "support": []}
     for u in cache.list_users():
         out.setdefault(u["default_mode"], []).append(u["email"])
     return out
 
 
-def _build_scenarios() -> list[dict]:
-    """Resolve the 7 demo scenarios against the live users table.
+def _build_beats() -> list[dict]:
+    """The actual demo flow. Edit presenter notes here; nothing else.
 
-    Returns a list of dicts with id, title, why, question, mode, sender, note.
+    `prewarm=True` → seeded into the cache before the demo (fast).
+    `prewarm=False` → runs live for the audience (real latency).
     """
     by_mode = _users_by_mode()
-
-    def pick(mode: str) -> str:
-        return by_mode.get(mode, [""])[0] if by_mode.get(mode) else ""
-
-    eng_sender = pick("eng")
-    sales_sender = pick("sales")
-    mktg_sender = pick("marketing")
-    sup_sender = pick("support") or eng_sender  # falls back to eng + subject tag
-
-    # For the cache-hit demo we want a DIFFERENT eng-default sender than scenario 1.
-    # If the user only has one eng-mode email, use a not-yet-known address — the
-    # webhook will still answer (lockdown off) and the audience sees the magic.
-    second_eng = ""
-    eng_users = by_mode.get("eng", [])
-    if len(eng_users) >= 2:
-        second_eng = eng_users[1]
-    else:
-        second_eng = "second-asker@team.example"
+    eng = (by_mode.get("eng") or [""])[0]
+    sales = (by_mode.get("sales") or [""])[0]
+    mktg = (by_mode.get("marketing") or [""])[0]
 
     return [
         {
-            "id": "eng-cited",
-            "title": "1. Engineering Q&A with cited file:line",
-            "why": "The basic loop. Nia retrieves code; Claude composes; reply links back to real GitHub blobs. Auto-CCs the engineer who last touched the cited code.",
+            "id": "beat1",
+            "label": "Beat 1 — The basic loop (live)",
             "question": "How does Hono handle middleware composition?",
             "mode": "eng",
-            "sender": eng_sender,
-            "note": "" if eng_sender else "Add an eng user in /admin first.",
+            "sender": eng,
+            "prewarm": False,
+            "notes": [
+                "Open the dashboard on screen, /admin already authed.",
+                "Send this question in the chat panel. ~25s — narrate while it runs:",
+                "  – \"Nia retrieves the relevant code; Claude composes the answer; AgentMail threads the reply.\"",
+                "When it returns: point to the cited sources list — these are real GitHub paths.",
+                "Point to the engineer attribution in the body — git blame on the cited file.",
+            ],
         },
         {
-            "id": "sales-mode",
-            "title": "2. Sales mode — capability answer, no code",
-            "why": "Same brain, different voice. Sales people get a customer-safe yes/no/partial-yes — no jargon, no code blocks. Sender's default mode is sales, no subject tag needed.",
+            "id": "beat2",
+            "label": "Beat 2 — Same brain, different voice (live)",
             "question": "Does Hono support custom error handlers and how robust are they?",
             "mode": "sales",
-            "sender": sales_sender,
-            "note": "" if sales_sender else "Add a sales user in /admin first.",
+            "sender": sales,
+            "prewarm": False,
+            "notes": [
+                "Click ▶ — the dashboard pre-fills with the sales sender + sales mode.",
+                "While Nia runs (~25s): \"Same codebase, same brain. But the asker is sales, so the voice changes.\"",
+                "When it returns: contrast — no code blocks, plain-language yes/partial-yes, customer-safe.",
+                "Optional callback: \"Subject tags override sender; type `[eng]` from the same address and you'd get code.\"",
+            ],
         },
         {
-            "id": "marketing-mode",
-            "title": "3. Marketing mode — hook + bullets + headline",
-            "why": "Marketing voice. Punchy hook, why-it-matters bullets, suggested tweet/headline. Same memory, repurposed.",
-            "question": "What's interesting about how Hono runs across edge runtimes that we could write about?",
-            "mode": "marketing",
-            "sender": mktg_sender,
-            "note": "" if mktg_sender else "Add a marketing user in /admin first.",
-        },
-        {
-            "id": "support-mode",
-            "title": "4. Support mode — BUG / EXPECTED / NEEDS-MORE-INFO triage",
-            "why": "Support agent voice. First word is the verdict label — code-grounded triage in seconds. Subject tag [support] forces the mode regardless of sender.",
-            "question": "[support] Customer says middleware after next() is silently swallowing thrown errors.",
-            "mode": "support",
-            "sender": sup_sender,
-            "note": "Add a support user in /admin to skip the [support] tag." if not by_mode.get("support") else "",
-        },
-        {
-            "id": "cross-repo",
-            "title": "5. Cross-repo answer (hono + node-server)",
-            "why": "Two repos indexed; Nia pulls from whichever is relevant. Sources should include the node-server adapter, not just core.",
-            "question": "How does Hono actually run on Node.js — what's the bridge between Hono's web-standards request and Node's req/res?",
-            "mode": "eng",
-            "sender": eng_sender,
-            "note": "",
-        },
-        {
-            "id": "cache-hit",
-            "title": "6. Memory across senders (cache magic ⚡)",
-            "why": "Run scenario 1 first, then this. Same question, different sender. First fired Nia (~25s). This one returns in <1s with 'Previously answered for [original sender]'. Dashboard shows the hit count tick up live.",
+            "id": "beat3",
+            "label": "Beat 3 — Memory across senders (cache hit ⚡)",
             "question": "How does Hono handle middleware composition?",
             "mode": "eng",
-            "sender": second_eng,
-            "note": "",
+            "sender": "newperson@later.com",
+            "prewarm": False,
+            "notes": [
+                "This re-asks Beat 1's question — but as a fresh sender.",
+                "Click ▶. Returns in <1s. The reply prepends \"Previously answered for [Beat 1's sender] on [date].\"",
+                "Point at the dashboard feed — the original entry's hit counter ticks up live.",
+                "Pitch line: \"Memory across workflows. Every email contributes to the org's knowledge graph.\"",
+            ],
         },
         {
-            "id": "unknown-sender",
-            "title": "7. Unknown sender → flagged in admin",
-            "why": "Email from someone not in the users table gets logged to the admin panel under 'Flagged'. Lockdown OFF: still answered. Lockdown ON: ignored.",
-            "question": "Hi, can you tell me about the codebase?",
+            "id": "beat4",
+            "label": "Beat 4 — Cross-repo + docs (warm)",
+            "question": "How does Hono actually run on Node.js — what's the bridge between Hono's web-standards request and Node's req/res?",
             "mode": "eng",
-            "sender": "stranger@unknown-domain.example",
-            "note": "",
+            "sender": eng,
+            "prewarm": True,
+            "notes": [
+                "Click ▶. Returns instantly (pre-warmed). Point to sources:",
+                "  – they include `honojs/node-server/...` (the adapter repo) AND",
+                "  – `Hono Docs` (the indexed documentation site).",
+                "Pitch line: \"Two repos and the docs, queried in one call. Same surface for any company's source corpus.\"",
+            ],
+        },
+        {
+            "id": "beat5-optional",
+            "label": "Beat 5 — Marketing-angle reuse (optional)",
+            "question": "What's interesting about how Hono runs across edge runtimes that we could write about?",
+            "mode": "marketing",
+            "sender": mktg,
+            "prewarm": False,
+            "notes": [
+                "Skip if running short. Otherwise: send live.",
+                "When it returns: hook + bullets + suggested headline. Reuses the same brain for content ideation.",
+                "This is the \"one inbox, multiple modes\" punchline — code, sales, marketing, support all share the source of truth.",
+            ],
         },
     ]
 
 
-# Backwards-compat: a flat tuple list still consumed by admin.py's prewarm task.
+# Used by the prewarm background task.
 _SCENARIOS = [
-    (s["id"], s["title"], s["why"], s["question"], s["mode"], s["sender"])
-    for s in _build_scenarios()
+    (b["id"], b["label"], "; ".join(b["notes"]), b["question"], b["mode"], b["sender"])
+    for b in _build_beats()
+    if b.get("prewarm")
 ]
 
 
-def _section(s: dict) -> str:
-    mailto = _mailto(f"[{s['mode']}] {s['title'].split('. ',1)[-1]}", s["question"])
-    dash = _dash_link(s["question"], s["mode"], s["sender"])
+def _section(b: dict) -> str:
+    mailto = _mailto(f"[{b['mode']}] {b['label']}", b["question"])
+    dash = _dash_link(b["question"], b["mode"], b["sender"])
     sender_html = (
-        f' · from: <strong>{html.escape(s["sender"])}</strong>'
-        if s["sender"] else
-        ' · <span style="color:#c33">no sender configured</span>'
+        f'from: <strong>{html.escape(b["sender"])}</strong>'
+        if b["sender"] else
+        '<span style="color:#c33">no sender configured</span>'
     )
-    note_html = (
-        f'<div style="font-size:12px;color:#c33;margin-top:6px">⚠ {html.escape(s["note"])}</div>'
-        if s["note"] else ""
+    notes_html = "".join(
+        f'<li>{html.escape(n)}</li>' for n in b.get("notes", [])
+    )
+    badge = (
+        '<span class="tag warm">⚡ pre-warmed</span>'
+        if b.get("prewarm") else
+        '<span class="tag live">▶ live (~25s)</span>'
     )
     return f"""
     <section class="card">
-      <h2>{html.escape(s['title'])}</h2>
-      <p class="why">{html.escape(s['why'])}</p>
-      <div class="q"><span class="lbl">Question:</span> {html.escape(s['question'])}</div>
-      <div class="meta">mode: <strong>{s['mode']}</strong>{sender_html}</div>
-      {note_html}
+      <div class="hd">
+        <h2>{html.escape(b['label'])}</h2>
+        {badge}
+      </div>
+      <div class="q"><span class="lbl">Question:</span> {html.escape(b['question'])}</div>
+      <div class="meta">mode: <strong>{b['mode']}</strong> · {sender_html}</div>
+      <details class="notes" open>
+        <summary>Presenter notes</summary>
+        <ul>{notes_html}</ul>
+      </details>
       <div class="actions">
-        <a class="btn" href="{dash}">▶ Run in dashboard</a>
+        <a class="btn" href="{dash}">▶ Open in dashboard</a>
         <a class="btn outline" href="{mailto}">✉ Send via email</a>
       </div>
     </section>
@@ -164,29 +164,39 @@ def _section(s: dict) -> str:
 
 
 def render() -> str:
-    scenarios = _build_scenarios()
-    sections = "\n".join(_section(s) for s in scenarios)
+    beats = _build_beats()
+    sections = "\n".join(_section(b) for b in beats)
     return f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Codebase Concierge — Demo</title>
+  <title>Codebase Concierge — Demo runbook</title>
   <style>
     body {{ font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
             background: #fafafa; color: #222; margin: 0; padding: 24px; }}
-    .wrap {{ max-width: 820px; margin: 0 auto; }}
+    .wrap {{ max-width: 860px; margin: 0 auto; }}
     h1 {{ font-size: 24px; margin: 0 0 4px 0; }}
-    .sub {{ color: #888; font-size: 13px; margin-bottom: 20px; }}
+    .sub {{ color: #888; font-size: 13px; margin-bottom: 18px; }}
     .nav a {{ margin-right: 16px; color: #0a3a99; font-size: 13px; }}
     .card {{ background: #fff; border-radius: 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.04);
-             padding: 16px 20px; margin-bottom: 14px; }}
-    .card h2 {{ font-size: 15px; margin: 0 0 6px; }}
-    .card .why {{ color: #555; font-size: 13px; margin: 0 0 10px; }}
+             padding: 18px 22px; margin-bottom: 14px; }}
+    .card .hd {{ display: flex; align-items: center; gap: 10px; margin: 0 0 12px; }}
+    .card h2 {{ font-size: 16px; margin: 0; }}
+    .tag {{ font-size: 11px; padding: 2px 8px; border-radius: 4px;
+            text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px; }}
+    .tag.warm {{ background: #fff8d6; color: #8a6300; }}
+    .tag.live {{ background: #e0eafc; color: #0a3a99; }}
     .card .q {{ font-size: 14px; padding: 8px 12px; background: #f4f6fa;
-                border-left: 3px solid #0a3a99; border-radius: 4px; margin: 10px 0 4px; }}
+                border-left: 3px solid #0a3a99; border-radius: 4px; margin: 0 0 4px; }}
     .card .q .lbl {{ font-size: 11px; color: #888; text-transform: uppercase;
                       letter-spacing: 0.5px; margin-right: 6px; }}
-    .card .meta {{ font-size: 12px; color: #666; margin-bottom: 10px; }}
+    .card .meta {{ font-size: 12px; color: #666; margin: 8px 0 12px; }}
+    .notes {{ background: #fafafa; border: 1px solid #eee; border-radius: 6px;
+              padding: 10px 14px; margin-bottom: 12px; }}
+    .notes summary {{ cursor: pointer; font-size: 12px; font-weight: 600;
+                       color: #555; text-transform: uppercase; letter-spacing: 0.5px; }}
+    .notes ul {{ margin: 8px 0 0 18px; padding: 0; font-size: 13px; line-height: 1.55; color: #333; }}
+    .notes li {{ margin-bottom: 4px; }}
     .card .actions {{ display: flex; gap: 8px; flex-wrap: wrap; }}
     .btn {{ display: inline-block; padding: 7px 14px; border-radius: 6px;
             background: #0a3a99; color: white; font-size: 13px; font-weight: 500;
@@ -199,7 +209,7 @@ def render() -> str:
 <body>
   <div class="wrap">
     <h1>Codebase Concierge — demo runbook</h1>
-    <div class="sub">Click ▶ to fire a scenario in the dashboard, ✉ to send it as a real email through AgentMail. Senders are pulled from the configured users in <a href="/admin">/admin</a>.</div>
+    <div class="sub">Beat-by-beat plan with presenter notes. The "Pre-warm for demo" button in /admin only seeds the warm beats — the live ones stay genuinely fresh.</div>
     <div class="nav">
       <a href="/">live log →</a>
       <a href="/admin">admin →</a>

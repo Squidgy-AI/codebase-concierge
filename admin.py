@@ -17,12 +17,19 @@ import cache
 
 
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "").strip()
+ALLOW_INSECURE_ADMIN = os.environ.get("ALLOW_INSECURE_ADMIN", "").strip() == "1"
 _security = HTTPBasic(auto_error=False)
 
 
 def _require_admin(creds: HTTPBasicCredentials | None = Depends(_security)) -> None:
     if not ADMIN_PASSWORD:
-        return  # no password set → bypass (dev convenience)
+        if ALLOW_INSECURE_ADMIN:
+            return  # explicit local-dev opt-in
+        raise HTTPException(
+            status_code=503,
+            detail="Admin disabled: ADMIN_PASSWORD not configured. "
+                   "Set ADMIN_PASSWORD, or ALLOW_INSECURE_ADMIN=1 for local dev only.",
+        )
     if creds is None or not secrets.compare_digest(creds.password or "", ADMIN_PASSWORD):
         raise HTTPException(
             status_code=401,
@@ -245,10 +252,10 @@ def render(nia_sources: list[dict] | None = None) -> str:
     </div>
 
     <div class="panel">
-      <h2 style="margin-top:0">Pre-warm cache</h2>
+      <h2 style="margin-top:0">Pre-warm for demo</h2>
       <form method="post" action="/admin/prewarm" class="toggle">
-        <button type="submit">▶ Run all demo scenarios</button>
-        <span class="state">Runs the 7 questions on /demo through the brain, populating the cache. Misses fire Nia (~25s each); hits are instant. Runs in background — refresh /admin or / to see entries appear.</span>
+        <button type="submit">▶ Pre-warm cached beats</button>
+        <span class="state">Seeds only the demo beats marked <code>prewarm</code> in /demo. Live beats stay fresh on stage. Runs in background — refresh / to see entries appear.</span>
       </form>
     </div>
 
@@ -575,6 +582,6 @@ async def _run_prewarm(scenarios) -> None:
             print(f"[prewarm] {sid} failed: {e}")
 
 
-@router.get("/api/users")
+@router.get("/api/users", dependencies=[Depends(_require_admin)])
 async def api_users():
     return cache.list_users()
