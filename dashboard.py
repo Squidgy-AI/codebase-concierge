@@ -92,7 +92,8 @@ def _row(entry: dict) -> str:
     sender = html.escape(entry["original_sender"] or "unknown")
     # Searchable text for the client-side filter (lowercased question + sender + mode)
     search_blob = html.escape(f"{question} {sender} {mode}".lower())
-    answer_html = entry.get("answer_html") or ""
+    # Defense in depth: rows cached before sanitize_html landed must still be safe.
+    answer_html = core.sanitize_html(entry.get("answer_html") or "")
     return (
         f'<article class="row" data-search="{search_blob}" data-mode="{mode}">'
         f'<div class="row-head" onclick="toggleRow(this)">'
@@ -251,6 +252,18 @@ def render() -> str:
                         border: 1px solid #eee; overflow-x: auto; font-size: 12px; }}
     .chat-bubble code {{ background: #fff; }}
 
+    .chat-bubble.loading {{ padding: 14px 18px; }}
+    .countdown {{ display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }}
+    .countdown-num {{ font-size: 28px; font-weight: 600; color: #0a3a99;
+                       font-variant-numeric: tabular-nums; min-width: 48px; }}
+    .countdown-label {{ font-size: 11px; color: #888; text-transform: uppercase;
+                         letter-spacing: 0.5px; }}
+    .countdown-bar {{ width: 100%; height: 4px; background: #eee;
+                       border-radius: 2px; overflow: hidden; }}
+    .countdown-bar-fill {{ width: 0%; height: 100%;
+                            background: linear-gradient(90deg, #0a3a99, #4d7ed8);
+                            transition: width 0.15s linear; }}
+
     .features {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
                   gap: 10px; margin: 0 0 16px 0; }}
     .feat {{ display: flex; gap: 10px; background: #fff; padding: 12px 14px;
@@ -378,9 +391,43 @@ def render() -> str:
       out.prepend(echo);
 
       const loading = document.createElement('div');
-      loading.className = 'chat-bubble';
-      loading.textContent = 'Thinking…';
+      loading.className = 'chat-bubble loading';
+      loading.innerHTML =
+        '<div class="countdown"><span class="countdown-num" id="cd-num">30</span>'
+        + '<span class="countdown-label">expected (s)</span></div>'
+        + '<div class="countdown-bar"><div class="countdown-bar-fill" id="cd-bar"></div></div>';
       out.prepend(loading);
+
+      const numEl = loading.querySelector('#cd-num');
+      const barEl = loading.querySelector('#cd-bar');
+      const EXPECTED = 30.0; // typical Nia + Claude latency
+      const startedAt = performance.now();
+      let cdTimer = setInterval(() => {{
+        const elapsed = (performance.now() - startedAt) / 1000;
+        const remaining = Math.max(0, EXPECTED - elapsed);
+        numEl.textContent = remaining < 10 ? remaining.toFixed(1) : Math.ceil(remaining);
+        barEl.style.width = Math.min(100, (elapsed / EXPECTED) * 100) + '%';
+      }}, 100);
+
+      // Smoothly accelerate the countdown to 0 once the answer arrives, even
+      // if it came back early. Visual cue that the agent beat its budget.
+      function snapToZero(actualMs) {{
+        clearInterval(cdTimer);
+        const start = performance.now();
+        const startVal = parseFloat(numEl.textContent) || EXPECTED;
+        const startWidth = parseFloat(barEl.style.width) || 0;
+        return new Promise(resolve => {{
+          function step() {{
+            const t = Math.min(1, (performance.now() - start) / 250);
+            const eased = 1 - Math.pow(1 - t, 3);
+            numEl.textContent = (startVal * (1 - eased)).toFixed(1);
+            barEl.style.width = (startWidth + (100 - startWidth) * eased) + '%';
+            if (t < 1) requestAnimationFrame(step);
+            else resolve();
+          }}
+          requestAnimationFrame(step);
+        }});
+      }}
 
       try {{
         const r = await fetch('/skill/ask', {{
@@ -390,6 +437,7 @@ def render() -> str:
         }});
         const data = await r.json();
         const dur = ((performance.now() - t0) / 1000).toFixed(1);
+        await snapToZero(performance.now() - t0);
         loading.className = 'chat-bubble' + (data.cache_hit ? ' cache' : '');
         loading.innerHTML = data.answer_html +
           '<div class="chat-meta">' +
@@ -399,6 +447,8 @@ def render() -> str:
         q.value = '';
         refreshFeed();
       }} catch (e) {{
+        clearInterval(cdTimer);
+        loading.className = 'chat-bubble';
         loading.textContent = 'Error: ' + e.message;
       }} finally {{
         send.disabled = false;
