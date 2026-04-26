@@ -259,7 +259,7 @@ def render(nia_sources: list[dict] | None = None, nonce: str = "") -> str:
 <body>
   <div class="wrap">
     <h1>Concierge — Admin</h1>
-    <div class="nav"><a href="/">← live log</a> · <a href="/admin/insights">📊 insights</a></div>
+    <div class="nav"><a href="/">← live log</a> · <a href="/admin/insights">📊 insights</a> · <a href="/setup">🔧 setup</a></div>
 
     <div class="panel">
       <div class="stat-row">
