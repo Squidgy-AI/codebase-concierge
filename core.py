@@ -241,9 +241,10 @@ _clone_attempts: set[str] = set()
 
 
 def ensure_repo_cloned(org: str, repo: str, depth: int = 300) -> bool:
-    """Best-effort lazy clone of a public GitHub repo into REPOS_DIR.
+    """Best-effort lazy clone of a GitHub repo into REPOS_DIR.
     Returns True if the repo is available locally afterwards. Skips work if the
-    clone already exists. Caches failures so we don't hammer GitHub on every miss."""
+    clone already exists. Caches failures so we don't hammer GitHub on every miss.
+    Honors GITHUB_TOKEN for private repos."""
     repo_dir = os.path.join(REPOS_DIR, repo)
     git_dir = os.path.join(repo_dir, ".git")
     if os.path.isdir(git_dir):
@@ -253,7 +254,11 @@ def ensure_repo_cloned(org: str, repo: str, depth: int = 300) -> bool:
         return False
     _clone_attempts.add(key)
     os.makedirs(REPOS_DIR, exist_ok=True)
-    url = f"https://github.com/{org}/{repo}.git"
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if token:
+        url = f"https://x-access-token:{token}@github.com/{org}/{repo}.git"
+    else:
+        url = f"https://github.com/{org}/{repo}.git"
     try:
         out = subprocess.run(
             ["git", "clone", f"--depth={depth}", url, repo_dir],

@@ -7,13 +7,18 @@ services:
       pip install -r requirements.txt
       mkdir -p "${REPOS_DIR:-repos}"
       # Clone every repo declared in NIA_REPOS so git blame works for cited files.
-      # Private repos will fail silently; they can still be answered (just no engineer attribution).
+      # Set GITHUB_TOKEN env var to clone private repos.
+      if [ -n "${GITHUB_TOKEN:-}" ]; then
+        clone_prefix="https://x-access-token:${GITHUB_TOKEN}@github.com"
+      else
+        clone_prefix="https://github.com"
+      fi
       for entry in $(echo "${NIA_REPOS:-}" | tr ',' ' '); do
         repo_name="${entry##*/}"
         target="${REPOS_DIR:-repos}/$repo_name"
         if [ -n "$repo_name" ] && [ ! -d "$target/.git" ]; then
           echo "[build] cloning $entry → $target"
-          git clone --depth=300 "https://github.com/$entry.git" "$target" || echo "[build] clone failed (private repo? check GITHUB_TOKEN)"
+          git clone --depth=300 "$clone_prefix/$entry.git" "$target" || echo "[build] clone failed (private repo? set GITHUB_TOKEN)"
         fi
       done
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
@@ -39,4 +44,6 @@ services:
       - key: CACHE_DB_PATH
         value: /disk/cache.db
       - key: ADMIN_PASSWORD
+        sync: false
+      - key: GITHUB_TOKEN
         sync: false
