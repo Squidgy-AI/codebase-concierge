@@ -701,6 +701,54 @@ async def add_repo(repo: str = Form(...), branch: str = Form("")):
     return RedirectResponse("/admin", status_code=303)
 
 
+@router.post("/admin/sources/repo/normalize", dependencies=[Depends(_require_admin)])
+async def normalize_repos():
+    """Walk the active repo list, coerce any URL-shaped or otherwise malformed
+    entries into 'org/repo[@branch]' form, drop duplicates and unparseable
+    entries, and re-trigger Nia indexing for each survivor (idempotent —
+    Nia's POST /v2/sources returns the existing source row if already indexed).
+    """
+    import core
+    before = core.get_active_repos()
+    seen: set[str] = set()
+    cleaned: list[str] = []
+    dropped: list[str] = []
+    for original in before:
+        repo, parsed_branch = _normalize_repo_input(original)
+        if not _REPO_PATTERN.match(repo):
+            dropped.append(original)
+            continue
+        # Preserve branch only if non-default. The original may already use
+        # @branch syntax; _normalize_repo_input picks that up via partition.
+        branch = parsed_branch
+        if branch == "main":
+            branch = ""
+        entry = f"{repo}@{branch}" if branch else repo
+        if entry in seen:
+            continue
+        seen.add(entry)
+        cleaned.append(entry)
+        try:
+            await core.nia_index_repo(repo, branch=branch or None)
+        except Exception as e:
+            print(f"[admin] re-index during normalize failed for {entry}: {e}")
+        try:
+            org, name = repo.split("/", 1)
+            core.ensure_repo_cloned(org, name)
+        except Exception as e:
+            print(f"[admin] local clone during normalize failed for {repo}: {e}")
+    _set_active_repos(cleaned)
+    _invalidate_cache_after_source_change(
+        f"normalize: {len(before)} → {len(cleaned)} (dropped {len(dropped)})"
+    )
+    return JSONResponse({
+        "before_count": len(before),
+        "after_count": len(cleaned),
+        "dropped": dropped,
+        "active": cleaned,
+    })
+
+
 @router.post("/admin/sources/repo/remove", dependencies=[Depends(_require_admin)])
 async def remove_repo(repo: str = Form(...)):
     import core
