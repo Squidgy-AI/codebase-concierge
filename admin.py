@@ -7,6 +7,7 @@ works without prompting visitors.
 """
 import html
 import os
+import re
 import secrets
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile
@@ -616,22 +617,63 @@ def _invalidate_cache_after_source_change(reason: str) -> None:
     print(f"[admin] purged {n} cache rows after source change: {reason}")
 
 
+_REPO_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._-]+$")
+
+
+def _normalize_repo_input(raw: str) -> tuple[str, str]:
+    """Coerce common copy-paste shapes into ('org/repo', 'branch_or_empty').
+
+    Accepts:
+      - 'org/repo'                                (canonical)
+      - 'org/repo@branch'                         (inline branch)
+      - 'https://github.com/org/repo'             (full URL)
+      - 'https://github.com/org/repo/tree/branch' (URL with branch)
+      - 'https://github.com/org/repo.git'         (clone URL)
+      - 'git@github.com:org/repo.git'             (SSH URL)
+
+    Returns ('', '') if the input can't be parsed; caller should 400.
+    """
+    s = raw.strip()
+    branch = ""
+    # SSH form: git@github.com:org/repo.git
+    if s.startswith("git@github.com:"):
+        s = s[len("git@github.com:"):]
+    # HTTP(S) form: strip protocol + host
+    for prefix in ("https://github.com/", "http://github.com/", "github.com/"):
+        if s.lower().startswith(prefix):
+            s = s[len(prefix):]
+            break
+    s = s.rstrip("/")
+    if s.endswith(".git"):
+        s = s[:-4]
+    # Pull branch out of '/tree/<branch>' segment if present.
+    if "/tree/" in s:
+        s, _, branch = s.partition("/tree/")
+        branch = branch.split("/", 1)[0].strip()
+    # Inline @branch wins over a tree-segment branch (more explicit).
+    if "@" in s:
+        repo_part, _, inline = s.partition("@")
+        if inline.strip():
+            branch = inline.strip()
+        s = repo_part.strip()
+    s = s.strip("/")
+    return s, branch
+
+
 @router.post("/admin/sources/repo/add", dependencies=[Depends(_require_admin)])
 async def add_repo(repo: str = Form(...), branch: str = Form("")):
     import core
-    raw = (repo or "").strip()
-    branch = (branch or "").strip()
-    # Allow either a separate branch field OR the inline 'org/repo@branch' shorthand.
-    # The inline form wins so power users can paste a single string.
-    if "@" in raw:
-        repo_part, _, inline_branch = raw.partition("@")
-        repo_part = repo_part.strip()
-        inline_branch = inline_branch.strip()
-        if inline_branch:
-            branch = inline_branch
-        raw = repo_part
-    if "/" not in raw:
-        raise HTTPException(status_code=400, detail="expected 'org/repo' (optionally 'org/repo@branch')")
+    raw_repo, parsed_branch = _normalize_repo_input(repo or "")
+    branch = (branch or "").strip() or parsed_branch
+    if not _REPO_PATTERN.match(raw_repo):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Couldn't parse that as a repo. Use 'org/repo' "
+                "(optionally 'org/repo@branch') or paste a github.com URL."
+            ),
+        )
+    raw = raw_repo
     # Normalize: 'main' is Nia's default — treat as no branch so the active-list
     # entry stays in the simpler 'org/repo' form.
     if branch == "main":
