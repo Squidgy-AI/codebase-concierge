@@ -141,14 +141,26 @@ def render(nia_sources: list[dict] | None = None, nonce: str = "") -> str:
     lock_state = "ON — unknown senders are logged and ignored" if lockdown else "OFF — unknown senders get answered (and still flagged)"
     cc_state = "ON — engineers in allowed domains will be CC'd on replies" if cc_enabled else "OFF — engineers shown in email body only, never CC'd"
 
-    repos_rows = "".join(
-        f'<tr><td><a href="https://github.com/{html.escape(r)}" target="_blank">{html.escape(r)}</a></td>'
-        f'<td><form method="post" action="/admin/sources/repo/remove" style="margin:0">'
-        f'  <input type="hidden" name="repo" value="{html.escape(r)}">'
-        f'  <button class="link-btn" type="submit" onclick="return confirm(\'Remove {html.escape(r)} from active list?\')">remove</button>'
-        f'</form></td></tr>'
-        for r in active_repos
-    ) or '<tr><td colspan="2" style="color:#999;text-align:center;padding:18px">No repos active.</td></tr>'
+    def _repo_row(entry: str) -> str:
+        repo, _, branch = entry.partition("@")
+        repo = repo.strip()
+        branch = branch.strip()
+        gh_url = f"https://github.com/{html.escape(repo)}"
+        if branch:
+            gh_url += f"/tree/{html.escape(branch)}"
+            label = f'{html.escape(repo)} <span style="color:#888;font-size:11px">@ {html.escape(branch)}</span>'
+        else:
+            label = html.escape(repo)
+        return (
+            f'<tr><td><a href="{gh_url}" target="_blank">{label}</a></td>'
+            f'<td><form method="post" action="/admin/sources/repo/remove" style="margin:0">'
+            f'  <input type="hidden" name="repo" value="{html.escape(entry)}">'
+            f'  <button class="link-btn" type="submit" onclick="return confirm(\'Remove {html.escape(entry)} from active list?\')">remove</button>'
+            f'</form></td></tr>'
+        )
+    repos_rows = "".join(_repo_row(r) for r in active_repos) or (
+        '<tr><td colspan="2" style="color:#999;text-align:center;padding:18px">No repos active.</td></tr>'
+    )
 
     def _doc_row(d: str) -> str:
         sid = doc_id_by_name.get(d)
@@ -321,6 +333,7 @@ def render(nia_sources: list[dict] | None = None, nonce: str = "") -> str:
       </table>
       <form method="post" action="/admin/sources/repo/add" class="form-row">
         <input type="text" name="repo" required placeholder="org/repo (e.g. honojs/middleware)">
+        <input type="text" name="branch" placeholder="branch (optional, default: main)" style="max-width:220px">
         <button type="submit">Add &amp; index</button>
       </form>
 
@@ -604,29 +617,45 @@ def _invalidate_cache_after_source_change(reason: str) -> None:
 
 
 @router.post("/admin/sources/repo/add", dependencies=[Depends(_require_admin)])
-async def add_repo(repo: str = Form(...)):
+async def add_repo(repo: str = Form(...), branch: str = Form("")):
     import core
-    repo = (repo or "").strip()
-    if "/" not in repo:
-        raise HTTPException(status_code=400, detail="expected 'org/repo'")
+    raw = (repo or "").strip()
+    branch = (branch or "").strip()
+    # Allow either a separate branch field OR the inline 'org/repo@branch' shorthand.
+    # The inline form wins so power users can paste a single string.
+    if "@" in raw:
+        repo_part, _, inline_branch = raw.partition("@")
+        repo_part = repo_part.strip()
+        inline_branch = inline_branch.strip()
+        if inline_branch:
+            branch = inline_branch
+        raw = repo_part
+    if "/" not in raw:
+        raise HTTPException(status_code=400, detail="expected 'org/repo' (optionally 'org/repo@branch')")
+    # Normalize: 'main' is Nia's default — treat as no branch so the active-list
+    # entry stays in the simpler 'org/repo' form.
+    if branch == "main":
+        branch = ""
+    entry = f"{raw}@{branch}" if branch else raw
     try:
-        await core.nia_index_repo(repo)
+        await core.nia_index_repo(raw, branch=branch or None)
     except Exception as e:
-        # Common case: Nia rejects private/auth-required repos. Surface but still accept
-        # the addition so the operator can fix the index out-of-band.
-        print(f"[admin] nia_index_repo failed for {repo}: {e}")
+        # Common case: Nia rejects private/auth-required repos, or the branch
+        # doesn't exist yet. Surface but still accept the addition so the
+        # operator can fix the index out-of-band.
+        print(f"[admin] nia_index_repo failed for {entry}: {e}")
     # Best-effort local clone so git blame works for cited files. Doesn't block
     # the response if it fails (e.g. private repo without GITHUB_TOKEN).
     try:
-        org, name = repo.split("/", 1)
+        org, name = raw.split("/", 1)
         core.ensure_repo_cloned(org, name)
     except Exception as e:
-        print(f"[admin] local clone failed for {repo}: {e}")
+        print(f"[admin] local clone failed for {raw}: {e}")
     active = core.get_active_repos()
-    if repo not in active:
-        active.append(repo)
+    if entry not in active:
+        active.append(entry)
     _set_active_repos(active)
-    _invalidate_cache_after_source_change(f"add repo {repo}")
+    _invalidate_cache_after_source_change(f"add repo {entry}")
     return RedirectResponse("/admin", status_code=303)
 
 

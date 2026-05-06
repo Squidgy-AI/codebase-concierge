@@ -306,7 +306,13 @@ async def agentmail_webhook(
     question = f"{subject}\n\n{body}".strip()
     history = await get_thread_messages(thread_id) if thread_id else []
 
-    result = await core.answer_codebase_question(question, history, sender=sender, mode=mode)
+    try:
+        result = await core.answer_codebase_question(question, history, sender=sender, mode=mode)
+    except core.NiaUpstreamError as e:
+        # Skip the email reply — better silence than spam — but record the
+        # failure so the operator sees it in Render logs and can re-poll.
+        print(f"[webhook] nia upstream error, skipping reply: {e}")
+        return {"ok": True, "skipped": "nia_upstream_error", "status": e.status}
 
     # Auto-CC requires (a) the admin toggle is ON and (b) the engineer's email
     # domain is in AUTO_CC_DOMAINS. Default OFF so we never surprise OSS maintainers.
@@ -345,10 +351,33 @@ async def skill_ask(req: AskRequest, request: Request, _auth: None = Depends(_re
     # Bearer-token clients are read-only — a leaked SKILL_API_KEY can't poison
     # the cache that webhook replies pull from.
     tier = getattr(request.state, "skill_auth", "bearer")
-    return await core.answer_codebase_question(
-        req.question, req.thread_history, sender=req.sender, mode=mode,
-        cache_writes=(tier in ("admin", "insecure")),
-    )
+    try:
+        return await core.answer_codebase_question(
+            req.question, req.thread_history, sender=req.sender, mode=mode,
+            cache_writes=(tier in ("admin", "insecure")),
+        )
+    except core.NiaUpstreamError as e:
+        # Return a friendly answer the dashboard can render rather than a bare
+        # 500/Internal-Server-Error string that breaks JSON.parse.
+        print(f"[skill_ask] nia upstream error: {e}")
+        msg = (
+            "<p><strong>Search is temporarily unavailable.</strong></p>"
+            f"<p>Nia returned <code>{e.status or 'connection error'}</code>. "
+            "This usually clears within a few minutes — try again shortly.</p>"
+        )
+        return JSONResponse(
+            status_code=200,
+            content={
+                "answer_html": msg,
+                "answer_md": "Search temporarily unavailable.",
+                "sources": [],
+                "engineers": [],
+                "cache_hit": False,
+                "mode": mode,
+                "error": "nia_upstream",
+                "upstream_status": e.status,
+            },
+        )
 
 
 @app.get("/", response_class=HTMLResponse, dependencies=[Depends(admin._require_admin)])

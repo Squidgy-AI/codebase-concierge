@@ -71,8 +71,31 @@ claude = Anthropic(api_key=ANTHROPIC_API_KEY)
 
 # ---------- Nia ----------
 
+class NiaUpstreamError(Exception):
+    """Raised when Nia's API returns a non-2xx or the request fails entirely.
+    Caught by route handlers so a transient Nia issue doesn't crash the endpoint
+    with a bare 'Internal Server Error' string."""
+    def __init__(self, status: int | None, detail: str):
+        self.status = status
+        self.detail = detail
+        super().__init__(f"Nia upstream {status}: {detail}")
+
+
+def _parse_repo_entry(entry: str) -> tuple[str, str | None]:
+    """Split an active-list entry like 'org/repo' or 'org/repo@branch' into
+    (repo, branch_or_none). Empty branch and 'main' both normalize to None
+    (Nia's default), so the search payload stays in the simpler string form."""
+    repo, _, branch = entry.partition("@")
+    repo = repo.strip()
+    branch = branch.strip()
+    if not branch or branch == "main":
+        return repo, None
+    return repo, branch
+
+
 def get_active_repos() -> list[str]:
-    """Active repos for Nia queries: admin-managed setting overrides env var."""
+    """Active repos for Nia queries: admin-managed setting overrides env var.
+    Entries may be 'org/repo' (default branch) or 'org/repo@branch'."""
     override = (cache.get_setting("nia_repos", "") or "").strip()
     if override:
         return [r.strip() for r in override.split(",") if r.strip()]
@@ -91,23 +114,39 @@ async def nia_query(question: str) -> dict:
 
     NOTE: ~25s latency. Pre-warm before demos. Free plan = 50 queries/month.
     """
+    parsed = [_parse_repo_entry(e) for e in get_active_repos()]
+    # If any active repo pins a non-default branch, send the whole list as
+    # objects so Nia doesn't silently fall back to main for those entries.
+    # Otherwise keep the simpler string form.
+    if any(b for _, b in parsed):
+        repos_payload = [
+            {"repository": r, "branch": b} if b else {"repository": r, "branch": "main"}
+            for r, b in parsed
+        ]
+    else:
+        repos_payload = [r for r, _ in parsed]
     payload = {
         "mode": "query",
         "messages": [{"role": "user", "content": question}],
-        "repositories": get_active_repos(),
+        "repositories": repos_payload,
     }
     ds = get_active_data_sources()
     if ds:
         payload["data_sources"] = ds
 
-    async with httpx.AsyncClient(timeout=60) as client:
-        r = await client.post(
-            f"{NIA_BASE}/v2/search",
-            headers={"Authorization": f"Bearer {NIA_API_KEY}"},
-            json=payload,
-        )
-        r.raise_for_status()
-        return r.json()
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.post(
+                f"{NIA_BASE}/v2/search",
+                headers={"Authorization": f"Bearer {NIA_API_KEY}"},
+                json=payload,
+            )
+    except httpx.RequestError as e:
+        raise NiaUpstreamError(None, f"connection failed: {e}") from e
+    if r.status_code >= 400:
+        body_preview = (r.text or "")[:300]
+        raise NiaUpstreamError(r.status_code, body_preview or "no body")
+    return r.json()
 
 
 async def nia_get_source(source_id: str) -> dict:
@@ -172,13 +211,17 @@ async def nia_list_sources() -> list[dict]:
         return (r.json() or {}).get("items", [])
 
 
-async def nia_index_repo(repo: str) -> dict:
-    """Trigger Nia indexing on a public org/repo. Returns the source row."""
+async def nia_index_repo(repo: str, branch: str | None = None) -> dict:
+    """Trigger Nia indexing on a public org/repo. Returns the source row.
+    If branch is None or 'main', Nia uses the repo's default branch."""
+    body = {"type": "repository", "repository": repo.strip()}
+    if branch and branch.strip() and branch.strip() != "main":
+        body["branch"] = branch.strip()
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(
             f"{NIA_BASE}/v2/sources",
             headers={"Authorization": f"Bearer {NIA_API_KEY}"},
-            json={"type": "repository", "repository": repo.strip()},
+            json=body,
         )
         r.raise_for_status()
         return r.json()
